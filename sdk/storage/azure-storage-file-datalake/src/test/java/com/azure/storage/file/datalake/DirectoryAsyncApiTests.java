@@ -642,7 +642,7 @@ public class DirectoryAsyncApiTests extends DataLakeTestBase {
     }
 
     @Test
-    public void deleteRecursivelyAsync() {
+    public void deleteRecursively() {
         dc = dataLakeFileSystemAsyncClient.getDirectoryAsyncClient(generatePathName());
 
         Mono<Void> response = dc.create()
@@ -658,7 +658,7 @@ public class DirectoryAsyncApiTests extends DataLakeTestBase {
     }
 
     @Test
-    public void deleteRecursivelyAsyncWithResponse() {
+    public void deleteRecursivelyWithResponse() {
         dc = dataLakeFileSystemAsyncClient.getDirectoryAsyncClient(generatePathName());
 
         Mono<Response<Void>> response = dc.create()

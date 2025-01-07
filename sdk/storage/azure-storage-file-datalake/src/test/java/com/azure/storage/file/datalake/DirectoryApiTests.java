@@ -616,45 +616,45 @@ public class DirectoryApiTests extends DataLakeTestBase {
         assertEquals(BlobErrorCode.BLOB_NOT_FOUND.toString(), e.getErrorCode());
     }
 
-    @Disabled("Requires manual OAuth setup and creates 5000+ files")
-    @RequiredServiceVersion(clazz = DataLakeServiceVersion.class, min = "2023-08-03")
-    @Test
-    public void deletePaginatedDirectory() {
-        String entityId = "68bff720-253b-428c-b124-603700654ea9";
-        DataLakeFileSystemClient fsClient = getFileSystemClientBuilder(dataLakeFileSystemClient.getFileSystemUrl())
-            .credential(ENVIRONMENT.getDataLakeAccount().getCredential())
-            .clientOptions(new HttpClientOptions()
-                .setProxyOptions(new ProxyOptions(ProxyOptions.Type.HTTP, new InetSocketAddress("localhost", 8888))))
-            .buildClient();
-
-        DataLakeDirectoryClient directoryClient = fsClient.getDirectoryClient(generatePathName());
-        directoryClient.create();
-
-        for (int i = 0; i < 5020; i++) {
-            DataLakeFileClient fileClient = directoryClient.getFileClient(generatePathName());
-            fileClient.createIfNotExists();
-        }
-        DataLakeDirectoryClient rootDirectory = fsClient.getDirectoryClient("/");
-        PathAccessControl acl = rootDirectory.getAccessControl();
-        acl.getAccessControlList()
-            .add(new PathAccessControlEntry()
-                .setPermissions(
-                    new RolePermissions().setReadPermission(true).setWritePermission(true).setExecutePermission(true))
-                .setAccessControlType(AccessControlType.USER)
-                .setEntityId(entityId));
-
-        rootDirectory.setAccessControlRecursive(acl.getAccessControlList());
-
-        DataLakeServiceClient oAuthServiceClient = getOAuthServiceClient();
-        DataLakeFileSystemClient oAuthFileSystemClient
-            = oAuthServiceClient.getFileSystemClient(fsClient.getFileSystemName());
-        DataLakeDirectoryClient oAuthDirectoryClient
-            = oAuthFileSystemClient.getDirectoryClient(directoryClient.getDirectoryPath());
-
-        Response<Void> response = oAuthDirectoryClient.deleteWithResponse(true, null, null, Context.NONE);
-        assertEquals(response.getStatusCode(), 200);
-
-    }
+//    @Disabled("Requires manual OAuth setup and creates 5000+ files")
+//    @RequiredServiceVersion(clazz = DataLakeServiceVersion.class, min = "2023-08-03")
+//    @Test
+//    public void deletePaginatedDirectory() {
+//        String entityId = "68bff720-253b-428c-b124-603700654ea9";
+//        DataLakeFileSystemClient fsClient = getFileSystemClientBuilder(dataLakeFileSystemClient.getFileSystemUrl())
+//            .credential(ENVIRONMENT.getDataLakeAccount().getCredential())
+//            .clientOptions(new HttpClientOptions()
+//                .setProxyOptions(new ProxyOptions(ProxyOptions.Type.HTTP, new InetSocketAddress("localhost", 8888))))
+//            .buildClient();
+//
+//        DataLakeDirectoryClient directoryClient = fsClient.getDirectoryClient(generatePathName());
+//        directoryClient.create();
+//
+//        for (int i = 0; i < 5020; i++) {
+//            DataLakeFileClient fileClient = directoryClient.getFileClient(generatePathName());
+//            fileClient.createIfNotExists();
+//        }
+//        DataLakeDirectoryClient rootDirectory = fsClient.getDirectoryClient("/");
+//        PathAccessControl acl = rootDirectory.getAccessControl();
+//        acl.getAccessControlList()
+//            .add(new PathAccessControlEntry()
+//                .setPermissions(
+//                    new RolePermissions().setReadPermission(true).setWritePermission(true).setExecutePermission(true))
+//                .setAccessControlType(AccessControlType.USER)
+//                .setEntityId(entityId));
+//
+//        rootDirectory.setAccessControlRecursive(acl.getAccessControlList());
+//
+//        DataLakeServiceClient oAuthServiceClient = getOAuthServiceClient();
+//        DataLakeFileSystemClient oAuthFileSystemClient
+//            = oAuthServiceClient.getFileSystemClient(fsClient.getFileSystemName());
+//        DataLakeDirectoryClient oAuthDirectoryClient
+//            = oAuthFileSystemClient.getDirectoryClient(directoryClient.getDirectoryPath());
+//
+//        Response<Void> response = oAuthDirectoryClient.deleteWithResponse(true, null, null, Context.NONE);
+//        assertEquals(response.getStatusCode(), 200);
+//
+//    }
 
     @ParameterizedTest
     @MethodSource("modifiedMatchAndLeaseIdSupplier")
@@ -2307,21 +2307,6 @@ public class DirectoryApiTests extends DataLakeTestBase {
     }
 
     @Test
-    public void getNonEncodedPathName() {
-        String pathName = "foo/bar";
-        String urlEncodedPathName = Utility.encodeUrlPath(pathName);
-
-        DataLakeDirectoryClient client
-            = getPathClientBuilder(getDataLakeCredential(), ENVIRONMENT.getDataLakeAccount().getDataLakeEndpoint())
-                .fileSystemName(generateFileSystemName())
-                .pathName(urlEncodedPathName)
-                .buildDirectoryClient();
-
-        assertEquals(pathName, client.getDirectoryPath());
-        assertTrue(client.getDirectoryUrl().contains(Utility.urlEncode(pathName)));
-    }
-
-    @Test
     public void getPropertiesDefault() {
         Response<PathProperties> response = dc.getPropertiesWithResponse(null, null, null);
         HttpHeaders headers = response.getHeaders();
@@ -3210,28 +3195,6 @@ public class DirectoryApiTests extends DataLakeTestBase {
         assertEquals(originalDirectoryName, client.getDirectoryPath());
     }
 
-    @Test
-    public void subdirectoryAndFilePaths() {
-        // testing to see if the subdirectory and file paths are created correctly
-        DataLakeDirectoryClient directoryClient = dataLakeFileSystemClient.getDirectoryClient("topdir");
-        directoryClient.createIfNotExists();
-        DataLakeDirectoryClient subDir = directoryClient.createSubdirectory("subdir");
-        DataLakeDirectoryClient subSubDir = subDir.createSubdirectory("subsubdir");
-        assertEquals(subDir.getDirectoryPath(), "topdir/subdir");
-
-        // ensuring the blob and dfs endpoints are the same while creating the subdirectory
-        assertEquals(subSubDir.getBlockBlobClient().getBlobUrl(),
-            DataLakeImplUtils.endpointToDesiredEndpoint(subSubDir.getPathUrl(), "blob", "dfs"));
-        assertEquals(subSubDir.getBlockBlobClient().getBlobName(), subSubDir.getDirectoryPath());
-        assertEquals("topdir/subdir/subsubdir", subSubDir.getDirectoryPath());
-        DataLakeFileClient fileClient = subSubDir.createFile("file");
-        assertEquals("topdir/subdir/subsubdir/file", fileClient.getFilePath());
-
-        // ensuring the blob and dfs endpoints are the same while creating the file
-        assertEquals(fileClient.getBlockBlobClient().getBlobUrl(),
-            DataLakeImplUtils.endpointToDesiredEndpoint(fileClient.getPathUrl(), "blob", "dfs"));
-    }
-
     @ParameterizedTest
     @MethodSource("fileEncodingSupplier")
     public void createDeleteSubDirectoryUrlEncoding(String originalDirectoryName) {
@@ -3557,5 +3520,44 @@ public class DirectoryApiTests extends DataLakeTestBase {
 
         assertTrue(aadDirClient.exists());
     }
+
+    //Unique Tests
+    @Test
+    public void getNonEncodedPathName() {
+        String pathName = "foo/bar";
+        String urlEncodedPathName = Utility.encodeUrlPath(pathName);
+
+        DataLakeDirectoryClient client
+            = getPathClientBuilder(getDataLakeCredential(), ENVIRONMENT.getDataLakeAccount().getDataLakeEndpoint())
+            .fileSystemName(generateFileSystemName())
+            .pathName(urlEncodedPathName)
+            .buildDirectoryClient();
+
+        assertEquals(pathName, client.getDirectoryPath());
+        assertTrue(client.getDirectoryUrl().contains(Utility.urlEncode(pathName)));
+    }
+
+    @Test
+    public void subdirectoryAndFilePaths() {
+        // testing to see if the subdirectory and file paths are created correctly
+        DataLakeDirectoryClient directoryClient = dataLakeFileSystemClient.getDirectoryClient("topdir");
+        directoryClient.createIfNotExists();
+        DataLakeDirectoryClient subDir = directoryClient.createSubdirectory("subdir");
+        DataLakeDirectoryClient subSubDir = subDir.createSubdirectory("subsubdir");
+        assertEquals(subDir.getDirectoryPath(), "topdir/subdir");
+
+        // ensuring the blob and dfs endpoints are the same while creating the subdirectory
+        assertEquals(subSubDir.getBlockBlobClient().getBlobUrl(),
+            DataLakeImplUtils.endpointToDesiredEndpoint(subSubDir.getPathUrl(), "blob", "dfs"));
+        assertEquals(subSubDir.getBlockBlobClient().getBlobName(), subSubDir.getDirectoryPath());
+        assertEquals("topdir/subdir/subsubdir", subSubDir.getDirectoryPath());
+        DataLakeFileClient fileClient = subSubDir.createFile("file");
+        assertEquals("topdir/subdir/subsubdir/file", fileClient.getFilePath());
+
+        // ensuring the blob and dfs endpoints are the same while creating the file
+        assertEquals(fileClient.getBlockBlobClient().getBlobUrl(),
+            DataLakeImplUtils.endpointToDesiredEndpoint(fileClient.getPathUrl(), "blob", "dfs"));
+    }
+
 
 }
