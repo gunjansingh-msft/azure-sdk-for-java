@@ -2299,21 +2299,6 @@ public class FileApiTest extends DataLakeTestBase {
     }
 
     @Test
-    public void getNonEncodedPathName() {
-        String pathName = "foo/bar";
-        String urlEncodedPathName = Utility.encodeUrlPath(pathName);
-
-        DataLakeFileClient client
-            = getPathClientBuilder(getDataLakeCredential(), ENVIRONMENT.getDataLakeAccount().getDataLakeEndpoint())
-                .fileSystemName(generateFileSystemName())
-                .pathName(urlEncodedPathName)
-                .buildFileClient();
-
-        assertEquals(pathName, client.getFilePath());
-        assertTrue(client.getFileUrl().contains(Utility.urlEncode(pathName)));
-    }
-
-    @Test
     public void builderBearerTokenValidation() {
         // Technically no additional checks need to be added to datalake builder since the corresponding blob builder fails
         String endpoint = BlobUrlParts.parse(fc.getFileUrl()).setScheme("http").toUrl().toString();
@@ -2605,56 +2590,6 @@ public class FileApiTest extends DataLakeTestBase {
         fc.flush(b.length(), true);
     }
 
-    @LiveOnly
-    @Test
-    public void uploadAndDownloadAndUploadAgain() {
-        byte[] randomData = getRandomByteArray(20 * Constants.MB);
-        ByteArrayInputStream input = new ByteArrayInputStream(randomData);
-
-        String pathName = generatePathName();
-        DataLakeFileClient fileClient = dataLakeFileSystemClient.getFileClient(pathName);
-        fileClient.createIfNotExists();
-
-        ParallelTransferOptions parallelTransferOptions
-            = new ParallelTransferOptions().setBlockSizeLong((long) Constants.MB)
-                .setMaxSingleUploadSizeLong(2L * Constants.MB)
-                .setMaxConcurrency(5);
-        FileParallelUploadOptions parallelUploadOptions
-            = new FileParallelUploadOptions(input).setParallelTransferOptions(parallelTransferOptions);
-
-        fileClient.uploadWithResponse(parallelUploadOptions, null, null);
-
-        DataLakeFileOpenInputStreamResult inputStreamResult = fileClient.openInputStream();
-
-        // Upload the downloaded content to a different location
-        String pathName2 = generatePathName();
-
-        parallelUploadOptions = new FileParallelUploadOptions(inputStreamResult.getInputStream())
-            .setParallelTransferOptions(parallelTransferOptions);
-
-        DataLakeFileClient fileClient2 = dataLakeFileSystemClient.getFileClient(pathName2);
-        fileClient2.uploadWithResponse(parallelUploadOptions, null, null);
-    }
-
-    private static byte[] readFromInputStream(InputStream stream, int numBytesToRead) {
-        byte[] queryData = new byte[numBytesToRead];
-
-        int length = numBytesToRead;
-        int bytesRead;
-
-        try {
-            while (length > 0 && (bytesRead = stream.read(queryData, numBytesToRead - length, length)) != -1) {
-                length -= bytesRead;
-            }
-
-            stream.close();
-        } catch (IOException ex) {
-            throw new UncheckedIOException(ex);
-        }
-
-        return queryData;
-    }
-
     @RequiredServiceVersion(clazz = DataLakeServiceVersion.class, min = "2019-12-12")
     @ParameterizedTest
     @ValueSource(
@@ -2832,33 +2767,6 @@ public class FileApiTest extends DataLakeTestBase {
         return Stream.of(
             // numCopies | recordSeparator
             Arguments.of(0, '\n'), Arguments.of(10, '\n'), Arguments.of(100, '\n'), Arguments.of(1000, '\n'));
-    }
-
-    @SuppressWarnings("DataFlowIssue")
-    @RequiredServiceVersion(clazz = DataLakeServiceVersion.class, min = "2020-10-02")
-    @Test
-    public void queryInputParquet() {
-        String fileName = "parquet.parquet";
-        ClassLoader classLoader = getClass().getClassLoader();
-        File f = new File(classLoader.getResource(fileName).getFile());
-        FileQueryParquetSerialization ser = new FileQueryParquetSerialization();
-        fc.uploadFromFile(f.getAbsolutePath(), true);
-        byte[] expectedData = "0,mdifjt55.ea3,mdifjt55.ea3\n".getBytes();
-
-        String expression = "select * from blobstorage where id < 1;";
-
-        liveTestScenarioWithRetry(() -> {
-            FileQueryOptions optionsIs = new FileQueryOptions(expression).setInputSerialization(ser);
-            ByteArrayOutputStream os = new ByteArrayOutputStream();
-            FileQueryOptions optionsOs = new FileQueryOptions(expression, os).setInputSerialization(ser);
-
-            InputStream qqStream = fc.openQueryInputStreamWithResponse(optionsIs).getValue();
-            byte[] queryData = assertDoesNotThrow(() -> readFromInputStream(qqStream, expectedData.length));
-            TestUtils.assertArraysEqual(expectedData, queryData);
-
-            assertDoesNotThrow(() -> fc.queryWithResponse(optionsOs, null, null));
-            TestUtils.assertArraysEqual(expectedData, os.toByteArray());
-        });
     }
 
     @RequiredServiceVersion(clazz = DataLakeServiceVersion.class, min = "2019-12-12")
@@ -3553,5 +3461,98 @@ public class FileApiTest extends DataLakeTestBase {
 
     private static Stream<Arguments> upnHeaderTestSupplier() {
         return Stream.of(Arguments.of(true), Arguments.of(true), Arguments.of((Boolean) null));
+    }
+
+    //Unique Tests
+    @Test
+    public void getNonEncodedPathName() {
+        String pathName = "foo/bar";
+        String urlEncodedPathName = Utility.encodeUrlPath(pathName);
+
+        DataLakeFileClient client
+            = getPathClientBuilder(getDataLakeCredential(), ENVIRONMENT.getDataLakeAccount().getDataLakeEndpoint())
+            .fileSystemName(generateFileSystemName())
+            .pathName(urlEncodedPathName)
+            .buildFileClient();
+
+        assertEquals(pathName, client.getFilePath());
+        assertTrue(client.getFileUrl().contains(Utility.urlEncode(pathName)));
+    }
+
+    @LiveOnly
+    @Test
+    public void uploadAndDownloadAndUploadAgain() {
+        byte[] randomData = getRandomByteArray(20 * Constants.MB);
+        ByteArrayInputStream input = new ByteArrayInputStream(randomData);
+
+        String pathName = generatePathName();
+        DataLakeFileClient fileClient = dataLakeFileSystemClient.getFileClient(pathName);
+        fileClient.createIfNotExists();
+
+        ParallelTransferOptions parallelTransferOptions
+            = new ParallelTransferOptions().setBlockSizeLong((long) Constants.MB)
+            .setMaxSingleUploadSizeLong(2L * Constants.MB)
+            .setMaxConcurrency(5);
+        FileParallelUploadOptions parallelUploadOptions
+            = new FileParallelUploadOptions(input).setParallelTransferOptions(parallelTransferOptions);
+
+        fileClient.uploadWithResponse(parallelUploadOptions, null, null);
+
+        DataLakeFileOpenInputStreamResult inputStreamResult = fileClient.openInputStream();
+
+        // Upload the downloaded content to a different location
+        String pathName2 = generatePathName();
+
+        parallelUploadOptions = new FileParallelUploadOptions(inputStreamResult.getInputStream())
+            .setParallelTransferOptions(parallelTransferOptions);
+
+        DataLakeFileClient fileClient2 = dataLakeFileSystemClient.getFileClient(pathName2);
+        fileClient2.uploadWithResponse(parallelUploadOptions, null, null);
+    }
+
+    private static byte[] readFromInputStream(InputStream stream, int numBytesToRead) {
+        byte[] queryData = new byte[numBytesToRead];
+
+        int length = numBytesToRead;
+        int bytesRead;
+
+        try {
+            while (length > 0 && (bytesRead = stream.read(queryData, numBytesToRead - length, length)) != -1) {
+                length -= bytesRead;
+            }
+
+            stream.close();
+        } catch (IOException ex) {
+            throw new UncheckedIOException(ex);
+        }
+
+        return queryData;
+    }
+
+    @SuppressWarnings("DataFlowIssue")
+    @RequiredServiceVersion(clazz = DataLakeServiceVersion.class, min = "2020-10-02")
+    @Test
+    public void queryInputParquet() {
+        String fileName = "parquet.parquet";
+        ClassLoader classLoader = getClass().getClassLoader();
+        File f = new File(classLoader.getResource(fileName).getFile());
+        FileQueryParquetSerialization ser = new FileQueryParquetSerialization();
+        fc.uploadFromFile(f.getAbsolutePath(), true);
+        byte[] expectedData = "0,mdifjt55.ea3,mdifjt55.ea3\n".getBytes();
+
+        String expression = "select * from blobstorage where id < 1;";
+
+        liveTestScenarioWithRetry(() -> {
+            FileQueryOptions optionsIs = new FileQueryOptions(expression).setInputSerialization(ser);
+            ByteArrayOutputStream os = new ByteArrayOutputStream();
+            FileQueryOptions optionsOs = new FileQueryOptions(expression, os).setInputSerialization(ser);
+
+            InputStream qqStream = fc.openQueryInputStreamWithResponse(optionsIs).getValue();
+            byte[] queryData = assertDoesNotThrow(() -> readFromInputStream(qqStream, expectedData.length));
+            TestUtils.assertArraysEqual(expectedData, queryData);
+
+            assertDoesNotThrow(() -> fc.queryWithResponse(optionsOs, null, null));
+            TestUtils.assertArraysEqual(expectedData, os.toByteArray());
+        });
     }
 }
