@@ -1907,77 +1907,6 @@ public class FileAsyncApiTests extends DataLakeTestBase {
 
     }
 
-    @LiveOnly
-    @Test
-    public void downloadFileEtagLock() throws IOException {
-        File file = getRandomFile(Constants.MB);
-        file.deleteOnExit();
-        createdFiles.add(file);
-
-        File outFile = new File(prefix);
-        Files.deleteIfExists(outFile.toPath());
-        outFile.deleteOnExit();
-        createdFiles.add(outFile);
-
-        AtomicInteger counter = new AtomicInteger();
-
-        DataLakeFileAsyncClient facUploading
-            = instrument(new DataLakePathClientBuilder().endpoint(fc.getPathUrl()).credential(getDataLakeCredential()))
-                .buildFileAsyncClient();
-
-        HttpPipelinePolicy policy = (context, next) -> next.process().flatMap(response -> {
-            if (counter.incrementAndGet() == 1) {
-                // When the download begins trigger an upload to overwrite the downloading blob so that the download is
-                // able to get an ETag before it is changed.
-                return facUploading.upload(DATA.getDefaultFlux(), null, true).thenReturn(response);
-            }
-
-            return Mono.just(response);
-        });
-
-        DataLakeFileAsyncClient facDownloading = instrument(new DataLakePathClientBuilder().addPolicy(policy)
-            .endpoint(fc.getPathUrl())
-            .credential(getDataLakeCredential())).buildFileAsyncClient();
-
-        // Set up the download to happen in small chunks so many requests need to be sent, this will give the upload
-        // time to change the ETag therefore failing the download.
-        ParallelTransferOptions options = new ParallelTransferOptions().setBlockSizeLong((long) Constants.KB);
-
-        // This is done to prevent onErrorDropped exceptions from being logged at the error level. If no hook is
-        // registered for onErrorDropped the error is logged at the ERROR level.
-        //
-        // onErrorDropped is triggered once the reactive stream has emitted one element, after that exceptions are
-        // dropped.
-        Hooks.onErrorDropped(ignored -> {
-            /* do nothing with it */ });
-
-        StepVerifier
-            .create(
-                fc.uploadFromFile(file.toPath().toString(), true)
-                    .then(facDownloading.readToFileWithResponse(outFile.toPath().toString(), null, options, null, null,
-                        false, null)))
-            .verifyErrorSatisfies(ex -> {
-                // If an operation is running on multiple threads and multiple return an exception Reactor will combine
-                // them into a CompositeException which needs to be unwrapped. If there is only a single exception
-                // 'Exceptions.unwrapMultiple' will return a singleton list of the exception it was passed.
-                //
-                // These exceptions may be wrapped exceptions where the exception we are expecting is contained within
-                // ReactiveException that needs to be unwrapped. If the passed exception isn't a 'ReactiveException' it
-                // will be returned unmodified by 'Exceptions.unwrap'.
-                assertTrue(Exceptions.unwrapMultiple(ex).stream().anyMatch(ex2 -> {
-                    Throwable unwrapped = Exceptions.unwrap(ex2);
-                    if (unwrapped instanceof DataLakeStorageException) {
-                        return ((DataLakeStorageException) unwrapped).getStatusCode() == 412;
-                    }
-                    return false;
-                }));
-            });
-
-        // Give the file a chance to be deleted by the download operation before verifying its deletion
-        sleepIfRunningAgainstService(500);
-        assertFalse(outFile.exists());
-    }
-
     @SuppressWarnings("deprecation")
     @LiveOnly
     @ParameterizedTest
@@ -2666,43 +2595,6 @@ public class FileAsyncApiTests extends DataLakeTestBase {
                 .buildFileAsyncClient());
     }
 
-    // "No overwrite interrupted" tests were not ported over for datalake. This is because the access condition check
-    // occurs on the create method, so simple access conditions tests suffice.
-    @LiveOnly // Test uploads large amount of data
-    @ParameterizedTest
-    @MethodSource("uploadFromFileSupplier")
-    public void uploadFromFile(int fileSize, Long blockSize) throws IOException {
-        DataLakeFileAsyncClient fac = dataLakeFileSystemAsyncClient.getFileAsyncClient(generatePathName());
-        File file = getRandomFile(fileSize);
-        file.deleteOnExit();
-        createdFiles.add(file);
-
-        // Block length will be ignored for single shot.
-        StepVerifier
-            .create(fac.uploadFromFile(file.getPath(), new ParallelTransferOptions().setBlockSizeLong(blockSize), null,
-                null, null))
-            .verifyComplete();
-
-        File outFile = new File(file.getPath() + "result");
-        assertTrue(outFile.createNewFile());
-        outFile.deleteOnExit();
-        createdFiles.add(outFile);
-
-        StepVerifier.create(fac.readToFile(outFile.getPath(), true)).expectNextCount(1).verifyComplete();
-
-        compareFiles(file, outFile, 0, fileSize);
-    }
-
-    private static Stream<Arguments> uploadFromFileSupplier() {
-        return Stream.of(
-            // fileSize | blockSize
-            Arguments.of(10, null), // Size is too small to trigger block uploading
-            Arguments.of(10 * Constants.KB, null), // Size is too small to trigger block uploading
-            Arguments.of(50 * Constants.MB, null), // Size is too small to trigger block uploading
-            Arguments.of(101 * Constants.MB, 4L * 1024 * 1024) // Size is too small to trigger block uploading
-        );
-    }
-
     @Test
     public void uploadFromFileWithMetadata() {
         Map<String, String> metadata = Collections.singletonMap("metadata", "value");
@@ -2721,120 +2613,6 @@ public class FileAsyncApiTests extends DataLakeTestBase {
                 throw new RuntimeException(e);
             }
         }).verifyComplete();
-    }
-
-    @Test
-    public void uploadFromFileDefaultNoOverwrite() {
-        File file = getRandomFile(50);
-        file.deleteOnExit();
-        createdFiles.add(file);
-
-        StepVerifier.create(fc.uploadFromFile(file.toPath().toString())).verifyError(DataLakeStorageException.class);
-
-        Mono<Void> response = dataLakeFileSystemAsyncClient.createFile(generatePathName())
-            .flatMap(r -> r.uploadFromFile(getRandomFile(50).toPath().toString()));
-
-        StepVerifier.create(response).verifyError(DataLakeStorageException.class);
-    }
-
-    @Test
-    public void uploadFromFileOverwrite() {
-        File file = getRandomFile(50);
-        file.deleteOnExit();
-        createdFiles.add(file);
-
-        StepVerifier.create(fc.uploadFromFile(file.toPath().toString(), true)).verifyComplete();
-
-        Mono<Void> response = dataLakeFileSystemAsyncClient.createFile(generatePathName())
-            .flatMap(r -> r.uploadFromFile(getRandomFile(50).toPath().toString(), true));
-
-        StepVerifier.create(response).verifyComplete();
-    }
-
-    /*
-     * Reports the number of bytes sent when uploading a file. This is different from other reporters which track the
-     * number of reports as upload from file hooks into the loading data from disk data stream which is a hard-coded
-     * read size.
-     */
-    @SuppressWarnings("deprecation")
-    private static final class FileUploadReporter implements ProgressReceiver {
-        private long reportedByteCount;
-
-        @Override
-        public void reportProgress(long bytesTransferred) {
-            this.reportedByteCount = bytesTransferred;
-        }
-
-        long getReportedByteCount() {
-            return this.reportedByteCount;
-        }
-    }
-
-    private static final class FileUploadListener implements ProgressListener {
-        private long reportedByteCount;
-
-        @Override
-        public void handleProgress(long bytesTransferred) {
-            this.reportedByteCount = bytesTransferred;
-        }
-
-        long getReportedByteCount() {
-            return this.reportedByteCount;
-        }
-    }
-
-    @SuppressWarnings("deprecation")
-    @LiveOnly
-    @ParameterizedTest
-    @MethodSource("uploadFromFileWithProgressSupplier")
-    public void uploadFromFileReporter(int size, long blockSize, int bufferCount) {
-        DataLakeFileAsyncClient fac = dataLakeFileSystemAsyncClient.getFileAsyncClient(generatePathName());
-        FileAsyncApiTests.FileUploadReporter uploadReporter = new FileAsyncApiTests.FileUploadReporter();
-
-        File file = getRandomFile(size);
-        file.deleteOnExit();
-        createdFiles.add(file);
-
-        ParallelTransferOptions parallelTransferOptions = new ParallelTransferOptions().setBlockSizeLong(blockSize)
-            .setMaxConcurrency(bufferCount)
-            .setProgressReceiver(uploadReporter)
-            .setMaxSingleUploadSizeLong(blockSize - 1);
-
-        StepVerifier.create(fac.uploadFromFile(file.toPath().toString(), parallelTransferOptions, null, null, null))
-            .verifyComplete();
-
-        assertEquals(size, uploadReporter.getReportedByteCount());
-    }
-
-    private static Stream<Arguments> uploadFromFileWithProgressSupplier() {
-        return Stream.of(
-            // size | blockSize | bufferCount
-            Arguments.of(10 * Constants.MB, 10L * Constants.MB, 8),
-            Arguments.of(20 * Constants.MB, (long) Constants.MB, 5),
-            Arguments.of(10 * Constants.MB, 5L * Constants.MB, 2),
-            Arguments.of(10 * Constants.MB, 10L * Constants.KB, 100));
-    }
-
-    @LiveOnly
-    @ParameterizedTest
-    @MethodSource("uploadFromFileWithProgressSupplier")
-    public void uploadFromFileListener(int size, long blockSize, int bufferCount) {
-        DataLakeFileAsyncClient fac = dataLakeFileSystemAsyncClient.getFileAsyncClient(generatePathName());
-        FileAsyncApiTests.FileUploadListener uploadListener = new FileAsyncApiTests.FileUploadListener();
-
-        File file = getRandomFile(size);
-        file.deleteOnExit();
-        createdFiles.add(file);
-
-        ParallelTransferOptions parallelTransferOptions = new ParallelTransferOptions().setBlockSizeLong(blockSize)
-            .setMaxConcurrency(bufferCount)
-            .setProgressListener(uploadListener)
-            .setMaxSingleUploadSizeLong(blockSize - 1);
-
-        StepVerifier.create(fac.uploadFromFile(file.toPath().toString(), parallelTransferOptions, null, null, null))
-            .verifyComplete();
-
-        assertEquals(size, uploadListener.getReportedByteCount());
     }
 
     @ParameterizedTest
@@ -2872,10 +2650,10 @@ public class FileAsyncApiTests extends DataLakeTestBase {
         StepVerifier.create(fc.uploadFromFileWithResponse(file.toPath().toString(),
             new ParallelTransferOptions().setBlockSizeLong(blockSize).setMaxSingleUploadSizeLong(singleUploadSize),
             null, null, null)).assertNext(r -> {
-                assertEquals(200, r.getStatusCode());
-                assertNotNull(r.getValue().getETag());
-                assertNotNull(r.getValue().getLastModified());
-            }).verifyComplete();
+            assertEquals(200, r.getStatusCode());
+            assertNotNull(r.getValue().getETag());
+            assertNotNull(r.getValue().getLastModified());
+        }).verifyComplete();
 
         StepVerifier.create(fc.getProperties())
             .assertNext(r -> assertEquals(dataSize, r.getFileSize()))
@@ -2900,291 +2678,6 @@ public class FileAsyncApiTests extends DataLakeTestBase {
         StepVerifier.create(fc.getProperties()).assertNext(r -> assertEquals(0, r.getFileSize())).verifyComplete();
     }
 
-    @LiveOnly
-    @Test
-    public void asyncBufferedUploadEmpty() {
-        DataLakeFileAsyncClient fac = dataLakeFileSystemAsyncClient.getFileAsyncClient(generatePathName());
-
-        StepVerifier.create(fac.upload(Flux.just(ByteBuffer.wrap(new byte[0])), null))
-            .verifyError(DataLakeStorageException.class);
-    }
-
-    @LiveOnly
-    @ParameterizedTest
-    @MethodSource("asyncBufferedUploadEmptyBuffersSupplier")
-    public void asyncBufferedUploadEmptyBuffers(ByteBuffer buffer1, ByteBuffer buffer2, ByteBuffer buffer3,
-        byte[] expectedDownload) {
-        DataLakeFileAsyncClient fac = dataLakeFileSystemAsyncClient.getFileAsyncClient(generatePathName());
-
-        StepVerifier.create(fac.upload(Flux.fromIterable(Arrays.asList(buffer1, buffer2, buffer3)), null, true))
-            .assertNext(pathInfo -> assertNotNull(pathInfo.getETag()))
-            .verifyComplete();
-
-        StepVerifier.create(FluxUtil.collectBytesInByteBufferStream(fac.read()))
-            .assertNext(bytes -> TestUtils.assertArraysEqual(expectedDownload, bytes))
-            .verifyComplete();
-    }
-
-    private static Stream<Arguments> asyncBufferedUploadEmptyBuffersSupplier() {
-        ByteBuffer emptyBuffer = ByteBuffer.allocate(0);
-        byte[] helloBytes = "Hello".getBytes(StandardCharsets.UTF_8);
-        byte[] worldBytes = "world!".getBytes(StandardCharsets.UTF_8);
-
-        return Stream.of(
-            // buffer1 | buffer2 | buffer3 || expectedDownload
-            Arguments.of(ByteBuffer.wrap(helloBytes), ByteBuffer.wrap(" ".getBytes(StandardCharsets.UTF_8)),
-                ByteBuffer.wrap(worldBytes), "Hello world!".getBytes(StandardCharsets.UTF_8)),
-            Arguments.of(ByteBuffer.wrap(helloBytes), ByteBuffer.wrap(" ".getBytes(StandardCharsets.UTF_8)),
-                emptyBuffer, "Hello ".getBytes(StandardCharsets.UTF_8)),
-            Arguments.of(ByteBuffer.wrap(helloBytes), emptyBuffer, ByteBuffer.wrap(worldBytes),
-                "Helloworld!".getBytes(StandardCharsets.UTF_8)),
-            Arguments.of(emptyBuffer, ByteBuffer.wrap(" ".getBytes(StandardCharsets.UTF_8)),
-                ByteBuffer.wrap(worldBytes), " world!".getBytes(StandardCharsets.UTF_8)));
-    }
-
-    @LiveOnly // Test uploads large amount of data
-    @ParameterizedTest
-    @MethodSource("asyncBufferedUploadSupplier")
-    public void asyncBufferedUpload(int dataSize, long bufferSize, int numBuffs) {
-        byte[] data = getRandomByteArray(dataSize);
-        ParallelTransferOptions parallelTransferOptions = new ParallelTransferOptions().setBlockSizeLong(bufferSize)
-            .setMaxConcurrency(numBuffs)
-            .setMaxSingleUploadSizeLong(4L * Constants.MB);
-
-        Mono<byte[]> response = getPrimaryServiceClientForWrites(bufferSize)
-            .getFileSystemAsyncClient(dataLakeFileSystemAsyncClient.getFileSystemName())
-            .createFile(generatePathName())
-            .flatMap(r -> {
-                DataLakeFileAsyncClient facRead = dataLakeFileSystemAsyncClient.getFileAsyncClient(r.getFileName());
-                return r.upload(Flux.just(ByteBuffer.wrap(data)), parallelTransferOptions, true)
-                    .then(FluxUtil.collectBytesInByteBufferStream(facRead.read(), dataSize));
-            });
-
-        // Due to memory issues, this check only runs on small to medium-sized data sets.
-        if (dataSize < 100 * 1024 * 1024) {
-            StepVerifier.create(response)
-                .assertNext(bytes -> TestUtils.assertArraysEqual(data, bytes))
-                .verifyComplete();
-        }
-    }
-
-    private static Stream<Arguments> asyncBufferedUploadSupplier() {
-        return Stream.of(
-            // dataSize | bufferSize | numBuffs || blockCount
-            Arguments.of(35 * Constants.MB, 5L * Constants.MB, 2), // Requires cycling through the same buffers multiple times.
-            Arguments.of(35 * Constants.MB, 5L * Constants.MB, 5), // Most buffers may only be used once.
-            Arguments.of(100 * Constants.MB, 10L * Constants.MB, 2), // Larger data set.
-            Arguments.of(100 * Constants.MB, 10L * Constants.MB, 5), // Larger number of Buffs.
-            Arguments.of(10 * Constants.MB, (long) Constants.MB, 10), // Exactly enough buffer space to hold all the data.
-            Arguments.of(50 * Constants.MB, 10L * Constants.MB, 2), // Larger data.
-            Arguments.of(10 * Constants.MB, 2L * Constants.MB, 4), Arguments.of(10 * Constants.MB, 3L * Constants.MB, 3) // Data does not squarely fit in buffers.
-        );
-    }
-
-    private static void compareListToBuffer(List<ByteBuffer> buffers, ByteBuffer result) {
-        result.position(0);
-        for (ByteBuffer buffer : buffers) {
-            buffer.position(0);
-            result.limit(result.position() + buffer.remaining());
-
-            TestUtils.assertByteBuffersEqual(buffer, result);
-
-            result.position(result.position() + buffer.remaining());
-        }
-
-        assertEquals(0, result.remaining());
-    }
-
-    // Reporter for testing Progress Receiver
-    // Will count the number of reports that are triggered
-    @SuppressWarnings("deprecation")
-    private static final class Reporter implements ProgressReceiver {
-        private final long blockSize;
-        private long reportingCount;
-
-        Reporter(long blockSize) {
-            this.blockSize = blockSize;
-        }
-
-        @Override
-        public void reportProgress(long bytesTransferred) {
-            assert bytesTransferred % blockSize == 0;
-            this.reportingCount += 1;
-        }
-    }
-
-    private static final class Listener implements ProgressListener {
-        private final long blockSize;
-        private long reportingCount;
-
-        Listener(long blockSize) {
-            this.blockSize = blockSize;
-        }
-
-        @Override
-        public void handleProgress(long bytesTransferred) {
-            assert bytesTransferred % blockSize == 0;
-            this.reportingCount += 1;
-        }
-    }
-
-    @SuppressWarnings("deprecation")
-    @LiveOnly
-    @ParameterizedTest
-    @MethodSource("bufferedUploadWithProgressSupplier")
-    public void bufferedUploadWithReporter(int size, long blockSize, int bufferCount) {
-        DataLakeFileAsyncClient fac = dataLakeFileSystemAsyncClient.getFileAsyncClient(generatePathName());
-        FileAsyncApiTests.Reporter uploadReporter = new FileAsyncApiTests.Reporter(blockSize);
-
-        ParallelTransferOptions parallelTransferOptions = new ParallelTransferOptions().setBlockSizeLong(blockSize)
-            .setMaxConcurrency(bufferCount)
-            .setProgressReceiver(uploadReporter)
-            .setMaxSingleUploadSizeLong(4L * Constants.MB);
-
-        StepVerifier
-            .create(fac.uploadWithResponse(Flux.just(getRandomData(size)), parallelTransferOptions, null, null, null))
-            .assertNext(response -> {
-                assertEquals(200, response.getStatusCode());
-                // Verify that the reporting count is equal or greater than the size divided by block size in the case
-                // that operations need to be retried. Retry attempts will increment the reporting count.
-                assertTrue(uploadReporter.reportingCount >= (size / blockSize));
-            })
-            .verifyComplete();
-    }
-
-    private static Stream<Arguments> bufferedUploadWithProgressSupplier() {
-        return Stream.of(
-            // size | blockSize | bufferCount
-            Arguments.of(10 * Constants.MB, 10L * Constants.MB, 8),
-            Arguments.of(20 * Constants.MB, (long) Constants.MB, 5),
-            Arguments.of(10 * Constants.MB, 5L * Constants.MB, 2),
-            Arguments.of(10 * Constants.MB, 512L * Constants.KB, 20));
-    }
-
-    @LiveOnly
-    @ParameterizedTest
-    @MethodSource("bufferedUploadWithProgressSupplier")
-    public void bufferedUploadWithListener(int size, long blockSize, int bufferCount) {
-        DataLakeFileAsyncClient fac = dataLakeFileSystemAsyncClient.getFileAsyncClient(generatePathName());
-        FileAsyncApiTests.Listener uploadListener = new FileAsyncApiTests.Listener(blockSize);
-
-        ParallelTransferOptions parallelTransferOptions = new ParallelTransferOptions().setBlockSizeLong(blockSize)
-            .setMaxConcurrency(bufferCount)
-            .setProgressListener(uploadListener)
-            .setMaxSingleUploadSizeLong(4L * Constants.MB);
-
-        StepVerifier
-            .create(fac.uploadWithResponse(Flux.just(getRandomData(size)), parallelTransferOptions, null, null, null))
-            .assertNext(response -> {
-                assertEquals(200, response.getStatusCode());
-                // Verify that the reporting count is equal or greater than the size divided by block size in the case
-                // that operations need to be retried. Retry attempts will increment the reporting count.
-                assertTrue(uploadListener.reportingCount >= (size / blockSize));
-            })
-            .verifyComplete();
-    }
-
-    @LiveOnly // Test uploads large amount of data
-    @ParameterizedTest
-    @MethodSource("bufferedUploadChunkedSourceSupplier")
-    public void bufferedUploadChunkedSource(List<Integer> dataSizeList, long bufferSize, int numBuffers) {
-        // This test should validate that the upload should work regardless of what format the passed data is in because
-        // it will be chunked appropriately.
-        ParallelTransferOptions parallelTransferOptions
-            = new ParallelTransferOptions().setBlockSizeLong(bufferSize * Constants.MB)
-                .setMaxConcurrency(numBuffers)
-                .setMaxSingleUploadSizeLong(4L * Constants.MB);
-        List<ByteBuffer> dataList
-            = dataSizeList.stream().map(size -> getRandomData(size * Constants.MB)).collect(Collectors.toList());
-
-        Mono<byte[]> uploadOperation = getPrimaryServiceClientForWrites(bufferSize)
-            .getFileSystemAsyncClient(dataLakeFileSystemAsyncClient.getFileSystemName())
-            .createFile(generatePathName())
-            .flatMap(r -> {
-                DataLakeFileAsyncClient facRead = dataLakeFileSystemAsyncClient.getFileAsyncClient(r.getFileName());
-                return r.upload(Flux.fromIterable(dataList), parallelTransferOptions, true)
-                    .then(FluxUtil.collectBytesInByteBufferStream(facRead.read()));
-            });
-
-        StepVerifier.create(uploadOperation)
-            .assertNext(bytes -> compareListToBuffer(dataList, ByteBuffer.wrap(bytes)))
-            .verifyComplete();
-    }
-
-    private static Stream<Arguments> bufferedUploadChunkedSourceSupplier() {
-        return Stream.of(
-            // dataSizeList | bufferSize | numBuffers
-            Arguments.of(Arrays.asList(7, 7), 10L, 2), // First item fits entirely in the buffer, next item spans two buffers
-            Arguments.of(Arrays.asList(3, 3, 3, 3, 3, 3, 3), 10L, 2), // Multiple items fit non-exactly in one buffer.
-            Arguments.of(Arrays.asList(10, 10), 10L, 2), // Data fits exactly and does not need chunking.
-            Arguments.of(Arrays.asList(50, 51, 49), 10L, 2) // Data needs chunking and does not fit neatly in buffers. Requires waiting for buffers to be released.
-        );
-    }
-
-    // These two tests are to test optimizations in buffered upload for small files.
-    @LiveOnly
-    @ParameterizedTest
-    @MethodSource("bufferedUploadHandlePathingSupplier")
-    public void bufferedUploadHandlePathing(List<Integer> dataSizeList) {
-        DataLakeFileAsyncClient fac = dataLakeFileSystemAsyncClient.getFileAsyncClient(generatePathName());
-        List<ByteBuffer> dataList = dataSizeList.stream().map(this::getRandomData).collect(Collectors.toList());
-
-        Mono<byte[]> uploadOperation = fac
-            .upload(Flux.fromIterable(dataList),
-                new ParallelTransferOptions().setMaxSingleUploadSizeLong(4L * Constants.MB), true)
-            .then(FluxUtil.collectBytesInByteBufferStream(fac.read()));
-
-        StepVerifier.create(uploadOperation)
-            .assertNext(bytes -> compareListToBuffer(dataList, ByteBuffer.wrap(bytes)))
-            .verifyComplete();
-    }
-
-    @LiveOnly
-    @ParameterizedTest
-    @MethodSource("bufferedUploadHandlePathingSupplier")
-    public void bufferedUploadHandlePathingHotFlux(List<Integer> dataSizeList) {
-        DataLakeFileAsyncClient fac = dataLakeFileSystemAsyncClient.getFileAsyncClient(generatePathName());
-        List<ByteBuffer> dataList = dataSizeList.stream().map(this::getRandomData).collect(Collectors.toList());
-
-        Mono<byte[]> uploadOperation = fac
-            .upload(Flux.fromIterable(dataList).publish().autoConnect(),
-                new ParallelTransferOptions().setMaxSingleUploadSizeLong(4L * Constants.MB), true)
-            .then(FluxUtil.collectBytesInByteBufferStream(fac.read()));
-
-        StepVerifier.create(uploadOperation)
-            .assertNext(bytes -> compareListToBuffer(dataList, ByteBuffer.wrap(bytes)))
-            .verifyComplete();
-    }
-
-    private static Stream<List<Integer>> bufferedUploadHandlePathingSupplier() {
-        return Stream.of(Arrays.asList(10, 100, 1000, 10000), Arrays.asList(4 * Constants.MB + 1, 10),
-            Arrays.asList(4 * Constants.MB, 4 * Constants.MB), Collections.singletonList(4 * Constants.MB));
-    }
-
-    @LiveOnly
-    @ParameterizedTest
-    @MethodSource("bufferedUploadHandlePathingHotFluxWithTransientFailureSupplier")
-    public void bufferedUploadHandlePathingHotFluxWithTransientFailure(List<Integer> dataSizeList) {
-        DataLakeFileAsyncClient clientWithFailure = getFileAsyncClient(getDataLakeCredential(), fc.getFileUrl(),
-            new TransientFailureInjectingHttpPipelinePolicy());
-        List<ByteBuffer> dataList = dataSizeList.stream().map(this::getRandomData).collect(Collectors.toList());
-
-        DataLakeFileAsyncClient fcAsync = getFileAsyncClient(getDataLakeCredential(), fc.getFileUrl());
-
-        Mono<byte[]> uploadOperation = clientWithFailure
-            .upload(Flux.fromIterable(dataList).publish().autoConnect(),
-                new ParallelTransferOptions().setMaxSingleUploadSizeLong(4L * Constants.MB), true)
-            .then(FluxUtil.collectBytesInByteBufferStream(fcAsync.read()));
-
-        StepVerifier.create(uploadOperation)
-            .assertNext(bytes -> compareListToBuffer(dataList, ByteBuffer.wrap(bytes)))
-            .verifyComplete();
-    }
-
-    private static Stream<List<Integer>> bufferedUploadHandlePathingHotFluxWithTransientFailureSupplier() {
-        return Stream.of(Arrays.asList(10, 100, 1000, 10000), Arrays.asList(4 * Constants.MB + 1, 10),
-            Arrays.asList(4 * Constants.MB, 4 * Constants.MB));
-    }
 
     @SuppressWarnings("deprecation")
     @LiveOnly
@@ -3207,217 +2700,6 @@ public class FileAsyncApiTests extends DataLakeTestBase {
                 .then(FluxUtil.collectBytesInByteBufferStream(fc.read()));
 
         StepVerifier.create(response).assertNext(r -> TestUtils.assertArraysEqual(data, r)).verifyComplete();
-    }
-
-    @Test
-    public void bufferedUploadIllegalArgumentsNull() {
-        Mono<PathInfo> response = dataLakeFileSystemAsyncClient.createFile(generatePathName())
-            .flatMap(r -> r.upload((Flux<ByteBuffer>) null,
-                new ParallelTransferOptions().setBlockSizeLong(4L).setMaxConcurrency(4), true));
-
-        StepVerifier.create(response).verifyError(NullPointerException.class);
-    }
-
-    @LiveOnly
-    @ParameterizedTest
-    @MethodSource("bufferedUploadHeadersSupplier")
-    public void bufferedUploadHeaders(int dataSize, String cacheControl, String contentDisposition,
-        String contentEncoding, String contentLanguage, boolean validateContentMD5, String contentType)
-        throws NoSuchAlgorithmException {
-        DataLakeFileAsyncClient fac = dataLakeFileSystemAsyncClient.getFileAsyncClient(generatePathName());
-
-        byte[] randomData = getRandomByteArray(dataSize);
-        byte[] contentMD5 = validateContentMD5 ? MessageDigest.getInstance("MD5").digest(randomData) : null;
-        Mono<Response<PathProperties>> uploadOperation
-            = fac
-                .uploadWithResponse(Flux.just(ByteBuffer.wrap(randomData)),
-                    new ParallelTransferOptions().setMaxSingleUploadSizeLong(4L * Constants.MB),
-                    new PathHttpHeaders().setCacheControl(cacheControl)
-                        .setContentDisposition(contentDisposition)
-                        .setContentEncoding(contentEncoding)
-                        .setContentLanguage(contentLanguage)
-                        .setContentMd5(contentMD5)
-                        .setContentType(contentType),
-                    null, null)
-                .then(fac.getPropertiesWithResponse(null));
-
-        StepVerifier.create(uploadOperation)
-            .assertNext(response -> validatePathProperties(response, cacheControl, contentDisposition, contentEncoding,
-                contentLanguage, contentMD5, contentType == null ? "application/octet-stream" : contentType))
-            .verifyComplete();
-    }
-
-    private static Stream<Arguments> bufferedUploadHeadersSupplier() {
-        return Stream.of(
-            // dataSize | cacheControl | contentDisposition | contentEncoding | contentLanguage | validateContentMD5 | contentType
-            Arguments.of(DATA.getDefaultDataSize(), null, null, null, null, true, null),
-            Arguments.of(DATA.getDefaultDataSize(), "control", "disposition", "encoding", "language", true, "type"),
-            Arguments.of(6 * Constants.MB, null, null, null, null, false, null),
-            Arguments.of(6 * Constants.MB, "control", "disposition", "encoding", "language", true, "type"));
-    }
-
-    @LiveOnly
-    @ParameterizedTest
-    @CsvSource(value = { "null,null,null,null", "foo,bar,fizz,buzz" }, nullValues = "null")
-    public void bufferedUploadMetadata(String key1, String value1, String key2, String value2) {
-        DataLakeFileAsyncClient fac = dataLakeFileSystemAsyncClient.getFileAsyncClient(generatePathName());
-        Map<String, String> metadata = new HashMap<>();
-        if (key1 != null) {
-            metadata.put(key1, value1);
-        }
-        if (key2 != null) {
-            metadata.put(key2, value2);
-        }
-
-        ParallelTransferOptions parallelTransferOptions
-            = new ParallelTransferOptions().setBlockSizeLong(10L).setMaxConcurrency(10);
-        Mono<Response<PathProperties>> uploadOperation
-            = fac.uploadWithResponse(Flux.just(getRandomData(10)), parallelTransferOptions, null, metadata, null)
-                .then(fac.getPropertiesWithResponse(null));
-
-        StepVerifier.create(uploadOperation).assertNext(response -> {
-            assertEquals(200, response.getStatusCode());
-            assertEquals(metadata, response.getValue().getMetadata());
-        }).verifyComplete();
-    }
-
-    @LiveOnly
-    @ParameterizedTest
-    @MethodSource("uploadNumberOfAppendsSupplier")
-    public void bufferedUploadOptions(int dataSize, Long singleUploadSize, Long blockSize, int numAppends) {
-        DataLakeFileAsyncClient fac = dataLakeFileSystemAsyncClient.getFileAsyncClient(generatePathName());
-        AtomicInteger appendCount = new AtomicInteger(0);
-        DataLakeFileAsyncClient spyClient = new DataLakeFileAsyncClient(fac) {
-            @Override
-            Mono<Response<Void>> appendWithResponse(Flux<ByteBuffer> data, long fileOffset, long length,
-                DataLakeFileAppendOptions appendOptions, Context context) {
-                appendCount.incrementAndGet();
-                return super.appendWithResponse(data, fileOffset, length, appendOptions, context);
-            }
-        };
-
-        StepVerifier.create(spyClient.uploadWithResponse(Flux.just(getRandomData(dataSize)),
-            new ParallelTransferOptions().setBlockSizeLong(blockSize).setMaxSingleUploadSizeLong(singleUploadSize),
-            null, null, null)).expectNextCount(1).verifyComplete();
-
-        StepVerifier.create(fac.getProperties())
-            .assertNext(properties -> assertEquals(dataSize, properties.getFileSize()))
-            .verifyComplete();
-
-        assertEquals(numAppends, appendCount.get());
-    }
-
-    @Test
-    public void bufferedUploadPermissionsAndUmask() {
-        DataLakeFileAsyncClient fac = dataLakeFileSystemAsyncClient.getFileAsyncClient(generatePathName());
-
-        Mono<Response<PathProperties>> uploadOperation = fac
-            .uploadWithResponse(
-                new FileParallelUploadOptions(Flux.just(getRandomData(10))).setPermissions("0777").setUmask("0057"))
-            .then(fac.getPropertiesWithResponse(null));
-
-        StepVerifier.create(uploadOperation).assertNext(response -> {
-            assertEquals(200, response.getStatusCode());
-            assertEquals(10, response.getValue().getFileSize());
-        }).verifyComplete();
-    }
-
-    @LiveOnly
-    @ParameterizedTest
-    @MethodSource("modifiedMatchAndLeaseIdSupplier")
-    public void bufferedUploadAC(OffsetDateTime modified, OffsetDateTime unmodified, String match, String noneMatch,
-        String leaseID) {
-        Mono<Response<PathInfo>> response = dataLakeFileSystemAsyncClient.createFile(generatePathName())
-            .flatMap(
-                fac -> Mono
-                    .zip(setupPathLeaseCondition(fac, leaseID), setupPathMatchCondition(fac, match),
-                        DataLakeTestBase::convertNulls)
-                    .flatMap(conditions -> {
-                        DataLakeRequestConditions drc = new DataLakeRequestConditions().setLeaseId(conditions.get(0))
-                            .setIfMatch(conditions.get(1))
-                            .setIfNoneMatch(noneMatch)
-                            .setIfModifiedSince(modified)
-                            .setIfUnmodifiedSince(unmodified);
-                        ParallelTransferOptions parallelTransferOptions
-                            = new ParallelTransferOptions().setBlockSizeLong(10L);
-                        return fac.uploadWithResponse(Flux.just(getRandomData(10)), parallelTransferOptions, null, null,
-                            drc);
-                    }));
-
-        assertAsyncResponseStatusCode(response, 200);
-    }
-
-    @LiveOnly
-    @ParameterizedTest
-    @MethodSource("invalidModifiedMatchAndLeaseIdSupplier")
-    public void bufferedUploadACFail(OffsetDateTime modified, OffsetDateTime unmodified, String match, String noneMatch,
-        String leaseID) {
-        Mono<Response<PathInfo>> response = dataLakeFileSystemAsyncClient.createFile(generatePathName())
-            .flatMap(
-                fac -> Mono
-                    .zip(setupPathLeaseCondition(fac, leaseID), setupPathMatchCondition(fac, noneMatch),
-                        DataLakeTestBase::convertNulls)
-                    .flatMap(conditions -> {
-                        DataLakeRequestConditions drc = new DataLakeRequestConditions().setLeaseId(conditions.get(0))
-                            .setIfMatch(match)
-                            .setIfNoneMatch(conditions.get(1))
-                            .setIfModifiedSince(modified)
-                            .setIfUnmodifiedSince(unmodified);
-                        ParallelTransferOptions parallelTransferOptions
-                            = new ParallelTransferOptions().setBlockSizeLong(10L);
-
-                        return fac.uploadWithResponse(Flux.just(getRandomData(10)), parallelTransferOptions, null, null,
-                            drc);
-                    }));
-
-        StepVerifier.create(response).verifyErrorSatisfies(ex -> {
-            DataLakeStorageException exception = assertInstanceOf(DataLakeStorageException.class, ex);
-            assertEquals(412, exception.getStatusCode());
-        });
-    }
-
-    // UploadBufferPool used to lock when the number of failed stageblocks exceeded the maximum number of buffers
-    // (discovered when a leaseId was invalid)
-    @LiveOnly
-    @ParameterizedTest
-    @CsvSource({ "7,2", "5,2" })
-    public void uploadBufferPoolLockThreeOrMoreBuffers(long blockSize, int numBuffers) {
-        ParallelTransferOptions parallelTransferOptions
-            = new ParallelTransferOptions().setBlockSizeLong(blockSize).setMaxConcurrency(numBuffers);
-
-        Mono<Response<PathInfo>> response = dataLakeFileSystemAsyncClient.createFile(generatePathName())
-            .flatMap(fac -> Mono.zip(setupPathLeaseCondition(fac, GARBAGE_LEASE_ID), Mono.just(fac)))
-            .flatMap(tuple -> {
-                DataLakeRequestConditions requestConditions = new DataLakeRequestConditions().setLeaseId(tuple.getT1());
-                return tuple.getT2()
-                    .uploadWithResponse(Flux.just(getRandomData(10)), parallelTransferOptions, null, null,
-                        requestConditions);
-            });
-
-        StepVerifier.create(response).verifyError(DataLakeStorageException.class);
-    }
-
-    @LiveOnly
-    @Test
-    public void bufferedUploadDefaultNoOverwrite() {
-        DataLakeFileAsyncClient fac = dataLakeFileSystemAsyncClient.getFileAsyncClient(generatePathName());
-
-        StepVerifier.create(fac.upload(DATA.getDefaultFlux(), null).then(fac.upload(DATA.getDefaultFlux(), null)))
-            .verifyError(IllegalArgumentException.class);
-    }
-
-    @LiveOnly
-    @Test
-    public void bufferedUploadOverwrite() {
-        DataLakeFileAsyncClient fac = dataLakeFileSystemAsyncClient.getFileAsyncClient(generatePathName());
-
-        File file = getRandomFile(50);
-        file.deleteOnExit();
-        createdFiles.add(file);
-
-        StepVerifier.create(fc.uploadFromFile(file.toPath().toString(), true)).verifyComplete();
-
-        StepVerifier.create(fac.uploadFromFile(getRandomFile(50).toPath().toString(), true)).verifyComplete();
     }
 
     @Test
@@ -4332,6 +3614,728 @@ public class FileAsyncApiTests extends DataLakeTestBase {
 
     private static Stream<Arguments> upnHeaderTestSupplier() {
         return Stream.of(Arguments.of(false), Arguments.of(true), Arguments.of((Boolean) null));
+    }
+
+    //Unique Tests
+    @LiveOnly
+    @Test
+    public void downloadFileEtagLock() throws IOException {
+        File file = getRandomFile(Constants.MB);
+        file.deleteOnExit();
+        createdFiles.add(file);
+
+        File outFile = new File(prefix);
+        Files.deleteIfExists(outFile.toPath());
+        outFile.deleteOnExit();
+        createdFiles.add(outFile);
+
+        AtomicInteger counter = new AtomicInteger();
+
+        DataLakeFileAsyncClient facUploading
+            = instrument(new DataLakePathClientBuilder().endpoint(fc.getPathUrl()).credential(getDataLakeCredential()))
+            .buildFileAsyncClient();
+
+        HttpPipelinePolicy policy = (context, next) -> next.process().flatMap(response -> {
+            if (counter.incrementAndGet() == 1) {
+                // When the download begins trigger an upload to overwrite the downloading blob so that the download is
+                // able to get an ETag before it is changed.
+                return facUploading.upload(DATA.getDefaultFlux(), null, true).thenReturn(response);
+            }
+
+            return Mono.just(response);
+        });
+
+        DataLakeFileAsyncClient facDownloading = instrument(new DataLakePathClientBuilder().addPolicy(policy)
+            .endpoint(fc.getPathUrl())
+            .credential(getDataLakeCredential())).buildFileAsyncClient();
+
+        // Set up the download to happen in small chunks so many requests need to be sent, this will give the upload
+        // time to change the ETag therefore failing the download.
+        ParallelTransferOptions options = new ParallelTransferOptions().setBlockSizeLong((long) Constants.KB);
+
+        // This is done to prevent onErrorDropped exceptions from being logged at the error level. If no hook is
+        // registered for onErrorDropped the error is logged at the ERROR level.
+        //
+        // onErrorDropped is triggered once the reactive stream has emitted one element, after that exceptions are
+        // dropped.
+        Hooks.onErrorDropped(ignored -> {
+            /* do nothing with it */ });
+
+        StepVerifier
+            .create(
+                fc.uploadFromFile(file.toPath().toString(), true)
+                    .then(facDownloading.readToFileWithResponse(outFile.toPath().toString(), null, options, null, null,
+                        false, null)))
+            .verifyErrorSatisfies(ex -> {
+                // If an operation is running on multiple threads and multiple return an exception Reactor will combine
+                // them into a CompositeException which needs to be unwrapped. If there is only a single exception
+                // 'Exceptions.unwrapMultiple' will return a singleton list of the exception it was passed.
+                //
+                // These exceptions may be wrapped exceptions where the exception we are expecting is contained within
+                // ReactiveException that needs to be unwrapped. If the passed exception isn't a 'ReactiveException' it
+                // will be returned unmodified by 'Exceptions.unwrap'.
+                assertTrue(Exceptions.unwrapMultiple(ex).stream().anyMatch(ex2 -> {
+                    Throwable unwrapped = Exceptions.unwrap(ex2);
+                    if (unwrapped instanceof DataLakeStorageException) {
+                        return ((DataLakeStorageException) unwrapped).getStatusCode() == 412;
+                    }
+                    return false;
+                }));
+            });
+
+        // Give the file a chance to be deleted by the download operation before verifying its deletion
+        sleepIfRunningAgainstService(500);
+        assertFalse(outFile.exists());
+    }
+
+
+    // "No overwrite interrupted" tests were not ported over for datalake. This is because the access condition check
+    // occurs on the create method, so simple access conditions tests suffice.
+    @LiveOnly // Test uploads large amount of data
+    @ParameterizedTest
+    @MethodSource("uploadFromFileSupplier")
+    public void uploadFromFile(int fileSize, Long blockSize) throws IOException {
+        DataLakeFileAsyncClient fac = dataLakeFileSystemAsyncClient.getFileAsyncClient(generatePathName());
+        File file = getRandomFile(fileSize);
+        file.deleteOnExit();
+        createdFiles.add(file);
+
+        // Block length will be ignored for single shot.
+        StepVerifier
+            .create(fac.uploadFromFile(file.getPath(), new ParallelTransferOptions().setBlockSizeLong(blockSize), null,
+                null, null))
+            .verifyComplete();
+
+        File outFile = new File(file.getPath() + "result");
+        assertTrue(outFile.createNewFile());
+        outFile.deleteOnExit();
+        createdFiles.add(outFile);
+
+        StepVerifier.create(fac.readToFile(outFile.getPath(), true)).expectNextCount(1).verifyComplete();
+
+        compareFiles(file, outFile, 0, fileSize);
+    }
+
+    private static Stream<Arguments> uploadFromFileSupplier() {
+        return Stream.of(
+            // fileSize | blockSize
+            Arguments.of(10, null), // Size is too small to trigger block uploading
+            Arguments.of(10 * Constants.KB, null), // Size is too small to trigger block uploading
+            Arguments.of(50 * Constants.MB, null), // Size is too small to trigger block uploading
+            Arguments.of(101 * Constants.MB, 4L * 1024 * 1024) // Size is too small to trigger block uploading
+        );
+    }
+
+    @Test
+    public void uploadFromFileDefaultNoOverwrite() {
+        File file = getRandomFile(50);
+        file.deleteOnExit();
+        createdFiles.add(file);
+
+        StepVerifier.create(fc.uploadFromFile(file.toPath().toString())).verifyError(DataLakeStorageException.class);
+
+        Mono<Void> response = dataLakeFileSystemAsyncClient.createFile(generatePathName())
+            .flatMap(r -> r.uploadFromFile(getRandomFile(50).toPath().toString()));
+
+        StepVerifier.create(response).verifyError(DataLakeStorageException.class);
+    }
+
+    @Test
+    public void uploadFromFileOverwrite() {
+        File file = getRandomFile(50);
+        file.deleteOnExit();
+        createdFiles.add(file);
+
+        StepVerifier.create(fc.uploadFromFile(file.toPath().toString(), true)).verifyComplete();
+
+        Mono<Void> response = dataLakeFileSystemAsyncClient.createFile(generatePathName())
+            .flatMap(r -> r.uploadFromFile(getRandomFile(50).toPath().toString(), true));
+
+        StepVerifier.create(response).verifyComplete();
+    }
+
+    /*
+     * Reports the number of bytes sent when uploading a file. This is different from other reporters which track the
+     * number of reports as upload from file hooks into the loading data from disk data stream which is a hard-coded
+     * read size.
+     */
+    @SuppressWarnings("deprecation")
+    private static final class FileUploadReporter implements ProgressReceiver {
+        private long reportedByteCount;
+
+        @Override
+        public void reportProgress(long bytesTransferred) {
+            this.reportedByteCount = bytesTransferred;
+        }
+
+        long getReportedByteCount() {
+            return this.reportedByteCount;
+        }
+    }
+
+    private static final class FileUploadListener implements ProgressListener {
+        private long reportedByteCount;
+
+        @Override
+        public void handleProgress(long bytesTransferred) {
+            this.reportedByteCount = bytesTransferred;
+        }
+
+        long getReportedByteCount() {
+            return this.reportedByteCount;
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    @LiveOnly
+    @ParameterizedTest
+    @MethodSource("uploadFromFileWithProgressSupplier")
+    public void uploadFromFileReporter(int size, long blockSize, int bufferCount) {
+        DataLakeFileAsyncClient fac = dataLakeFileSystemAsyncClient.getFileAsyncClient(generatePathName());
+        FileAsyncApiTests.FileUploadReporter uploadReporter = new FileAsyncApiTests.FileUploadReporter();
+
+        File file = getRandomFile(size);
+        file.deleteOnExit();
+        createdFiles.add(file);
+
+        ParallelTransferOptions parallelTransferOptions = new ParallelTransferOptions().setBlockSizeLong(blockSize)
+            .setMaxConcurrency(bufferCount)
+            .setProgressReceiver(uploadReporter)
+            .setMaxSingleUploadSizeLong(blockSize - 1);
+
+        StepVerifier.create(fac.uploadFromFile(file.toPath().toString(), parallelTransferOptions, null, null, null))
+            .verifyComplete();
+
+        assertEquals(size, uploadReporter.getReportedByteCount());
+    }
+
+    private static Stream<Arguments> uploadFromFileWithProgressSupplier() {
+        return Stream.of(
+            // size | blockSize | bufferCount
+            Arguments.of(10 * Constants.MB, 10L * Constants.MB, 8),
+            Arguments.of(20 * Constants.MB, (long) Constants.MB, 5),
+            Arguments.of(10 * Constants.MB, 5L * Constants.MB, 2),
+            Arguments.of(10 * Constants.MB, 10L * Constants.KB, 100));
+    }
+
+    @LiveOnly
+    @ParameterizedTest
+    @MethodSource("uploadFromFileWithProgressSupplier")
+    public void uploadFromFileListener(int size, long blockSize, int bufferCount) {
+        DataLakeFileAsyncClient fac = dataLakeFileSystemAsyncClient.getFileAsyncClient(generatePathName());
+        FileAsyncApiTests.FileUploadListener uploadListener = new FileAsyncApiTests.FileUploadListener();
+
+        File file = getRandomFile(size);
+        file.deleteOnExit();
+        createdFiles.add(file);
+
+        ParallelTransferOptions parallelTransferOptions = new ParallelTransferOptions().setBlockSizeLong(blockSize)
+            .setMaxConcurrency(bufferCount)
+            .setProgressListener(uploadListener)
+            .setMaxSingleUploadSizeLong(blockSize - 1);
+
+        StepVerifier.create(fac.uploadFromFile(file.toPath().toString(), parallelTransferOptions, null, null, null))
+            .verifyComplete();
+
+        assertEquals(size, uploadListener.getReportedByteCount());
+    }
+
+
+    @LiveOnly
+    @Test
+    public void asyncBufferedUploadEmpty() {
+        DataLakeFileAsyncClient fac = dataLakeFileSystemAsyncClient.getFileAsyncClient(generatePathName());
+
+        StepVerifier.create(fac.upload(Flux.just(ByteBuffer.wrap(new byte[0])), null))
+            .verifyError(DataLakeStorageException.class);
+    }
+
+    @LiveOnly
+    @ParameterizedTest
+    @MethodSource("asyncBufferedUploadEmptyBuffersSupplier")
+    public void asyncBufferedUploadEmptyBuffers(ByteBuffer buffer1, ByteBuffer buffer2, ByteBuffer buffer3,
+                                                byte[] expectedDownload) {
+        DataLakeFileAsyncClient fac = dataLakeFileSystemAsyncClient.getFileAsyncClient(generatePathName());
+
+        StepVerifier.create(fac.upload(Flux.fromIterable(Arrays.asList(buffer1, buffer2, buffer3)), null, true))
+            .assertNext(pathInfo -> assertNotNull(pathInfo.getETag()))
+            .verifyComplete();
+
+        StepVerifier.create(FluxUtil.collectBytesInByteBufferStream(fac.read()))
+            .assertNext(bytes -> TestUtils.assertArraysEqual(expectedDownload, bytes))
+            .verifyComplete();
+    }
+
+    private static Stream<Arguments> asyncBufferedUploadEmptyBuffersSupplier() {
+        ByteBuffer emptyBuffer = ByteBuffer.allocate(0);
+        byte[] helloBytes = "Hello".getBytes(StandardCharsets.UTF_8);
+        byte[] worldBytes = "world!".getBytes(StandardCharsets.UTF_8);
+
+        return Stream.of(
+            // buffer1 | buffer2 | buffer3 || expectedDownload
+            Arguments.of(ByteBuffer.wrap(helloBytes), ByteBuffer.wrap(" ".getBytes(StandardCharsets.UTF_8)),
+                ByteBuffer.wrap(worldBytes), "Hello world!".getBytes(StandardCharsets.UTF_8)),
+            Arguments.of(ByteBuffer.wrap(helloBytes), ByteBuffer.wrap(" ".getBytes(StandardCharsets.UTF_8)),
+                emptyBuffer, "Hello ".getBytes(StandardCharsets.UTF_8)),
+            Arguments.of(ByteBuffer.wrap(helloBytes), emptyBuffer, ByteBuffer.wrap(worldBytes),
+                "Helloworld!".getBytes(StandardCharsets.UTF_8)),
+            Arguments.of(emptyBuffer, ByteBuffer.wrap(" ".getBytes(StandardCharsets.UTF_8)),
+                ByteBuffer.wrap(worldBytes), " world!".getBytes(StandardCharsets.UTF_8)));
+    }
+
+    @LiveOnly // Test uploads large amount of data
+    @ParameterizedTest
+    @MethodSource("asyncBufferedUploadSupplier")
+    public void asyncBufferedUpload(int dataSize, long bufferSize, int numBuffs) {
+        byte[] data = getRandomByteArray(dataSize);
+        ParallelTransferOptions parallelTransferOptions = new ParallelTransferOptions().setBlockSizeLong(bufferSize)
+            .setMaxConcurrency(numBuffs)
+            .setMaxSingleUploadSizeLong(4L * Constants.MB);
+
+        Mono<byte[]> response = getPrimaryServiceClientForWrites(bufferSize)
+            .getFileSystemAsyncClient(dataLakeFileSystemAsyncClient.getFileSystemName())
+            .createFile(generatePathName())
+            .flatMap(r -> {
+                DataLakeFileAsyncClient facRead = dataLakeFileSystemAsyncClient.getFileAsyncClient(r.getFileName());
+                return r.upload(Flux.just(ByteBuffer.wrap(data)), parallelTransferOptions, true)
+                    .then(FluxUtil.collectBytesInByteBufferStream(facRead.read(), dataSize));
+            });
+
+        // Due to memory issues, this check only runs on small to medium-sized data sets.
+        if (dataSize < 100 * 1024 * 1024) {
+            StepVerifier.create(response)
+                .assertNext(bytes -> TestUtils.assertArraysEqual(data, bytes))
+                .verifyComplete();
+        }
+    }
+
+    private static Stream<Arguments> asyncBufferedUploadSupplier() {
+        return Stream.of(
+            // dataSize | bufferSize | numBuffs || blockCount
+            Arguments.of(35 * Constants.MB, 5L * Constants.MB, 2), // Requires cycling through the same buffers multiple times.
+            Arguments.of(35 * Constants.MB, 5L * Constants.MB, 5), // Most buffers may only be used once.
+            Arguments.of(100 * Constants.MB, 10L * Constants.MB, 2), // Larger data set.
+            Arguments.of(100 * Constants.MB, 10L * Constants.MB, 5), // Larger number of Buffs.
+            Arguments.of(10 * Constants.MB, (long) Constants.MB, 10), // Exactly enough buffer space to hold all the data.
+            Arguments.of(50 * Constants.MB, 10L * Constants.MB, 2), // Larger data.
+            Arguments.of(10 * Constants.MB, 2L * Constants.MB, 4), Arguments.of(10 * Constants.MB, 3L * Constants.MB, 3) // Data does not squarely fit in buffers.
+        );
+    }
+
+    private static void compareListToBuffer(List<ByteBuffer> buffers, ByteBuffer result) {
+        result.position(0);
+        for (ByteBuffer buffer : buffers) {
+            buffer.position(0);
+            result.limit(result.position() + buffer.remaining());
+
+            TestUtils.assertByteBuffersEqual(buffer, result);
+
+            result.position(result.position() + buffer.remaining());
+        }
+
+        assertEquals(0, result.remaining());
+    }
+
+    // Reporter for testing Progress Receiver
+    // Will count the number of reports that are triggered
+    @SuppressWarnings("deprecation")
+    private static final class Reporter implements ProgressReceiver {
+        private final long blockSize;
+        private long reportingCount;
+
+        Reporter(long blockSize) {
+            this.blockSize = blockSize;
+        }
+
+        @Override
+        public void reportProgress(long bytesTransferred) {
+            assert bytesTransferred % blockSize == 0;
+            this.reportingCount += 1;
+        }
+    }
+
+    private static final class Listener implements ProgressListener {
+        private final long blockSize;
+        private long reportingCount;
+
+        Listener(long blockSize) {
+            this.blockSize = blockSize;
+        }
+
+        @Override
+        public void handleProgress(long bytesTransferred) {
+            assert bytesTransferred % blockSize == 0;
+            this.reportingCount += 1;
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    @LiveOnly
+    @ParameterizedTest
+    @MethodSource("bufferedUploadWithProgressSupplier")
+    public void bufferedUploadWithReporter(int size, long blockSize, int bufferCount) {
+        DataLakeFileAsyncClient fac = dataLakeFileSystemAsyncClient.getFileAsyncClient(generatePathName());
+        FileAsyncApiTests.Reporter uploadReporter = new FileAsyncApiTests.Reporter(blockSize);
+
+        ParallelTransferOptions parallelTransferOptions = new ParallelTransferOptions().setBlockSizeLong(blockSize)
+            .setMaxConcurrency(bufferCount)
+            .setProgressReceiver(uploadReporter)
+            .setMaxSingleUploadSizeLong(4L * Constants.MB);
+
+        StepVerifier
+            .create(fac.uploadWithResponse(Flux.just(getRandomData(size)), parallelTransferOptions, null, null, null))
+            .assertNext(response -> {
+                assertEquals(200, response.getStatusCode());
+                // Verify that the reporting count is equal or greater than the size divided by block size in the case
+                // that operations need to be retried. Retry attempts will increment the reporting count.
+                assertTrue(uploadReporter.reportingCount >= (size / blockSize));
+            })
+            .verifyComplete();
+    }
+
+    private static Stream<Arguments> bufferedUploadWithProgressSupplier() {
+        return Stream.of(
+            // size | blockSize | bufferCount
+            Arguments.of(10 * Constants.MB, 10L * Constants.MB, 8),
+            Arguments.of(20 * Constants.MB, (long) Constants.MB, 5),
+            Arguments.of(10 * Constants.MB, 5L * Constants.MB, 2),
+            Arguments.of(10 * Constants.MB, 512L * Constants.KB, 20));
+    }
+
+    @LiveOnly
+    @ParameterizedTest
+    @MethodSource("bufferedUploadWithProgressSupplier")
+    public void bufferedUploadWithListener(int size, long blockSize, int bufferCount) {
+        DataLakeFileAsyncClient fac = dataLakeFileSystemAsyncClient.getFileAsyncClient(generatePathName());
+        FileAsyncApiTests.Listener uploadListener = new FileAsyncApiTests.Listener(blockSize);
+
+        ParallelTransferOptions parallelTransferOptions = new ParallelTransferOptions().setBlockSizeLong(blockSize)
+            .setMaxConcurrency(bufferCount)
+            .setProgressListener(uploadListener)
+            .setMaxSingleUploadSizeLong(4L * Constants.MB);
+
+        StepVerifier
+            .create(fac.uploadWithResponse(Flux.just(getRandomData(size)), parallelTransferOptions, null, null, null))
+            .assertNext(response -> {
+                assertEquals(200, response.getStatusCode());
+                // Verify that the reporting count is equal or greater than the size divided by block size in the case
+                // that operations need to be retried. Retry attempts will increment the reporting count.
+                assertTrue(uploadListener.reportingCount >= (size / blockSize));
+            })
+            .verifyComplete();
+    }
+
+    @LiveOnly // Test uploads large amount of data
+    @ParameterizedTest
+    @MethodSource("bufferedUploadChunkedSourceSupplier")
+    public void bufferedUploadChunkedSource(List<Integer> dataSizeList, long bufferSize, int numBuffers) {
+        // This test should validate that the upload should work regardless of what format the passed data is in because
+        // it will be chunked appropriately.
+        ParallelTransferOptions parallelTransferOptions
+            = new ParallelTransferOptions().setBlockSizeLong(bufferSize * Constants.MB)
+            .setMaxConcurrency(numBuffers)
+            .setMaxSingleUploadSizeLong(4L * Constants.MB);
+        List<ByteBuffer> dataList
+            = dataSizeList.stream().map(size -> getRandomData(size * Constants.MB)).collect(Collectors.toList());
+
+        Mono<byte[]> uploadOperation = getPrimaryServiceClientForWrites(bufferSize)
+            .getFileSystemAsyncClient(dataLakeFileSystemAsyncClient.getFileSystemName())
+            .createFile(generatePathName())
+            .flatMap(r -> {
+                DataLakeFileAsyncClient facRead = dataLakeFileSystemAsyncClient.getFileAsyncClient(r.getFileName());
+                return r.upload(Flux.fromIterable(dataList), parallelTransferOptions, true)
+                    .then(FluxUtil.collectBytesInByteBufferStream(facRead.read()));
+            });
+
+        StepVerifier.create(uploadOperation)
+            .assertNext(bytes -> compareListToBuffer(dataList, ByteBuffer.wrap(bytes)))
+            .verifyComplete();
+    }
+
+    private static Stream<Arguments> bufferedUploadChunkedSourceSupplier() {
+        return Stream.of(
+            // dataSizeList | bufferSize | numBuffers
+            Arguments.of(Arrays.asList(7, 7), 10L, 2), // First item fits entirely in the buffer, next item spans two buffers
+            Arguments.of(Arrays.asList(3, 3, 3, 3, 3, 3, 3), 10L, 2), // Multiple items fit non-exactly in one buffer.
+            Arguments.of(Arrays.asList(10, 10), 10L, 2), // Data fits exactly and does not need chunking.
+            Arguments.of(Arrays.asList(50, 51, 49), 10L, 2) // Data needs chunking and does not fit neatly in buffers. Requires waiting for buffers to be released.
+        );
+    }
+
+    // These two tests are to test optimizations in buffered upload for small files.
+    @LiveOnly
+    @ParameterizedTest
+    @MethodSource("bufferedUploadHandlePathingSupplier")
+    public void bufferedUploadHandlePathing(List<Integer> dataSizeList) {
+        DataLakeFileAsyncClient fac = dataLakeFileSystemAsyncClient.getFileAsyncClient(generatePathName());
+        List<ByteBuffer> dataList = dataSizeList.stream().map(this::getRandomData).collect(Collectors.toList());
+
+        Mono<byte[]> uploadOperation = fac
+            .upload(Flux.fromIterable(dataList),
+                new ParallelTransferOptions().setMaxSingleUploadSizeLong(4L * Constants.MB), true)
+            .then(FluxUtil.collectBytesInByteBufferStream(fac.read()));
+
+        StepVerifier.create(uploadOperation)
+            .assertNext(bytes -> compareListToBuffer(dataList, ByteBuffer.wrap(bytes)))
+            .verifyComplete();
+    }
+
+    @LiveOnly
+    @ParameterizedTest
+    @MethodSource("bufferedUploadHandlePathingSupplier")
+    public void bufferedUploadHandlePathingHotFlux(List<Integer> dataSizeList) {
+        DataLakeFileAsyncClient fac = dataLakeFileSystemAsyncClient.getFileAsyncClient(generatePathName());
+        List<ByteBuffer> dataList = dataSizeList.stream().map(this::getRandomData).collect(Collectors.toList());
+
+        Mono<byte[]> uploadOperation = fac
+            .upload(Flux.fromIterable(dataList).publish().autoConnect(),
+                new ParallelTransferOptions().setMaxSingleUploadSizeLong(4L * Constants.MB), true)
+            .then(FluxUtil.collectBytesInByteBufferStream(fac.read()));
+
+        StepVerifier.create(uploadOperation)
+            .assertNext(bytes -> compareListToBuffer(dataList, ByteBuffer.wrap(bytes)))
+            .verifyComplete();
+    }
+
+    private static Stream<List<Integer>> bufferedUploadHandlePathingSupplier() {
+        return Stream.of(Arrays.asList(10, 100, 1000, 10000), Arrays.asList(4 * Constants.MB + 1, 10),
+            Arrays.asList(4 * Constants.MB, 4 * Constants.MB), Collections.singletonList(4 * Constants.MB));
+    }
+
+    @LiveOnly
+    @ParameterizedTest
+    @MethodSource("bufferedUploadHandlePathingHotFluxWithTransientFailureSupplier")
+    public void bufferedUploadHandlePathingHotFluxWithTransientFailure(List<Integer> dataSizeList) {
+        DataLakeFileAsyncClient clientWithFailure = getFileAsyncClient(getDataLakeCredential(), fc.getFileUrl(),
+            new TransientFailureInjectingHttpPipelinePolicy());
+        List<ByteBuffer> dataList = dataSizeList.stream().map(this::getRandomData).collect(Collectors.toList());
+
+        DataLakeFileAsyncClient fcAsync = getFileAsyncClient(getDataLakeCredential(), fc.getFileUrl());
+
+        Mono<byte[]> uploadOperation = clientWithFailure
+            .upload(Flux.fromIterable(dataList).publish().autoConnect(),
+                new ParallelTransferOptions().setMaxSingleUploadSizeLong(4L * Constants.MB), true)
+            .then(FluxUtil.collectBytesInByteBufferStream(fcAsync.read()));
+
+        StepVerifier.create(uploadOperation)
+            .assertNext(bytes -> compareListToBuffer(dataList, ByteBuffer.wrap(bytes)))
+            .verifyComplete();
+    }
+
+    private static Stream<List<Integer>> bufferedUploadHandlePathingHotFluxWithTransientFailureSupplier() {
+        return Stream.of(Arrays.asList(10, 100, 1000, 10000), Arrays.asList(4 * Constants.MB + 1, 10),
+            Arrays.asList(4 * Constants.MB, 4 * Constants.MB));
+    }
+
+    @Test
+    public void bufferedUploadIllegalArgumentsNull() {
+        Mono<PathInfo> response = dataLakeFileSystemAsyncClient.createFile(generatePathName())
+            .flatMap(r -> r.upload((Flux<ByteBuffer>) null,
+                new ParallelTransferOptions().setBlockSizeLong(4L).setMaxConcurrency(4), true));
+
+        StepVerifier.create(response).verifyError(NullPointerException.class);
+    }
+
+    @LiveOnly
+    @ParameterizedTest
+    @MethodSource("bufferedUploadHeadersSupplier")
+    public void bufferedUploadHeaders(int dataSize, String cacheControl, String contentDisposition,
+                                      String contentEncoding, String contentLanguage, boolean validateContentMD5, String contentType)
+        throws NoSuchAlgorithmException {
+        DataLakeFileAsyncClient fac = dataLakeFileSystemAsyncClient.getFileAsyncClient(generatePathName());
+
+        byte[] randomData = getRandomByteArray(dataSize);
+        byte[] contentMD5 = validateContentMD5 ? MessageDigest.getInstance("MD5").digest(randomData) : null;
+        Mono<Response<PathProperties>> uploadOperation
+            = fac
+            .uploadWithResponse(Flux.just(ByteBuffer.wrap(randomData)),
+                new ParallelTransferOptions().setMaxSingleUploadSizeLong(4L * Constants.MB),
+                new PathHttpHeaders().setCacheControl(cacheControl)
+                    .setContentDisposition(contentDisposition)
+                    .setContentEncoding(contentEncoding)
+                    .setContentLanguage(contentLanguage)
+                    .setContentMd5(contentMD5)
+                    .setContentType(contentType),
+                null, null)
+            .then(fac.getPropertiesWithResponse(null));
+
+        StepVerifier.create(uploadOperation)
+            .assertNext(response -> validatePathProperties(response, cacheControl, contentDisposition, contentEncoding,
+                contentLanguage, contentMD5, contentType == null ? "application/octet-stream" : contentType))
+            .verifyComplete();
+    }
+
+    private static Stream<Arguments> bufferedUploadHeadersSupplier() {
+        return Stream.of(
+            // dataSize | cacheControl | contentDisposition | contentEncoding | contentLanguage | validateContentMD5 | contentType
+            Arguments.of(DATA.getDefaultDataSize(), null, null, null, null, true, null),
+            Arguments.of(DATA.getDefaultDataSize(), "control", "disposition", "encoding", "language", true, "type"),
+            Arguments.of(6 * Constants.MB, null, null, null, null, false, null),
+            Arguments.of(6 * Constants.MB, "control", "disposition", "encoding", "language", true, "type"));
+    }
+
+    @LiveOnly
+    @ParameterizedTest
+    @CsvSource(value = { "null,null,null,null", "foo,bar,fizz,buzz" }, nullValues = "null")
+    public void bufferedUploadMetadata(String key1, String value1, String key2, String value2) {
+        DataLakeFileAsyncClient fac = dataLakeFileSystemAsyncClient.getFileAsyncClient(generatePathName());
+        Map<String, String> metadata = new HashMap<>();
+        if (key1 != null) {
+            metadata.put(key1, value1);
+        }
+        if (key2 != null) {
+            metadata.put(key2, value2);
+        }
+
+        ParallelTransferOptions parallelTransferOptions
+            = new ParallelTransferOptions().setBlockSizeLong(10L).setMaxConcurrency(10);
+        Mono<Response<PathProperties>> uploadOperation
+            = fac.uploadWithResponse(Flux.just(getRandomData(10)), parallelTransferOptions, null, metadata, null)
+            .then(fac.getPropertiesWithResponse(null));
+
+        StepVerifier.create(uploadOperation).assertNext(response -> {
+            assertEquals(200, response.getStatusCode());
+            assertEquals(metadata, response.getValue().getMetadata());
+        }).verifyComplete();
+    }
+
+    @LiveOnly
+    @ParameterizedTest
+    @MethodSource("uploadNumberOfAppendsSupplier")
+    public void bufferedUploadOptions(int dataSize, Long singleUploadSize, Long blockSize, int numAppends) {
+        DataLakeFileAsyncClient fac = dataLakeFileSystemAsyncClient.getFileAsyncClient(generatePathName());
+        AtomicInteger appendCount = new AtomicInteger(0);
+        DataLakeFileAsyncClient spyClient = new DataLakeFileAsyncClient(fac) {
+            @Override
+            Mono<Response<Void>> appendWithResponse(Flux<ByteBuffer> data, long fileOffset, long length,
+                                                    DataLakeFileAppendOptions appendOptions, Context context) {
+                appendCount.incrementAndGet();
+                return super.appendWithResponse(data, fileOffset, length, appendOptions, context);
+            }
+        };
+
+        StepVerifier.create(spyClient.uploadWithResponse(Flux.just(getRandomData(dataSize)),
+            new ParallelTransferOptions().setBlockSizeLong(blockSize).setMaxSingleUploadSizeLong(singleUploadSize),
+            null, null, null)).expectNextCount(1).verifyComplete();
+
+        StepVerifier.create(fac.getProperties())
+            .assertNext(properties -> assertEquals(dataSize, properties.getFileSize()))
+            .verifyComplete();
+
+        assertEquals(numAppends, appendCount.get());
+    }
+
+    @Test
+    public void bufferedUploadPermissionsAndUmask() {
+        DataLakeFileAsyncClient fac = dataLakeFileSystemAsyncClient.getFileAsyncClient(generatePathName());
+
+        Mono<Response<PathProperties>> uploadOperation = fac
+            .uploadWithResponse(
+                new FileParallelUploadOptions(Flux.just(getRandomData(10))).setPermissions("0777").setUmask("0057"))
+            .then(fac.getPropertiesWithResponse(null));
+
+        StepVerifier.create(uploadOperation).assertNext(response -> {
+            assertEquals(200, response.getStatusCode());
+            assertEquals(10, response.getValue().getFileSize());
+        }).verifyComplete();
+    }
+
+    @LiveOnly
+    @ParameterizedTest
+    @MethodSource("modifiedMatchAndLeaseIdSupplier")
+    public void bufferedUploadAC(OffsetDateTime modified, OffsetDateTime unmodified, String match, String noneMatch,
+                                 String leaseID) {
+        Mono<Response<PathInfo>> response = dataLakeFileSystemAsyncClient.createFile(generatePathName())
+            .flatMap(
+                fac -> Mono
+                    .zip(setupPathLeaseCondition(fac, leaseID), setupPathMatchCondition(fac, match),
+                        DataLakeTestBase::convertNulls)
+                    .flatMap(conditions -> {
+                        DataLakeRequestConditions drc = new DataLakeRequestConditions().setLeaseId(conditions.get(0))
+                            .setIfMatch(conditions.get(1))
+                            .setIfNoneMatch(noneMatch)
+                            .setIfModifiedSince(modified)
+                            .setIfUnmodifiedSince(unmodified);
+                        ParallelTransferOptions parallelTransferOptions
+                            = new ParallelTransferOptions().setBlockSizeLong(10L);
+                        return fac.uploadWithResponse(Flux.just(getRandomData(10)), parallelTransferOptions, null, null,
+                            drc);
+                    }));
+
+        assertAsyncResponseStatusCode(response, 200);
+    }
+
+    @LiveOnly
+    @ParameterizedTest
+    @MethodSource("invalidModifiedMatchAndLeaseIdSupplier")
+    public void bufferedUploadACFail(OffsetDateTime modified, OffsetDateTime unmodified, String match, String noneMatch,
+                                     String leaseID) {
+        Mono<Response<PathInfo>> response = dataLakeFileSystemAsyncClient.createFile(generatePathName())
+            .flatMap(
+                fac -> Mono
+                    .zip(setupPathLeaseCondition(fac, leaseID), setupPathMatchCondition(fac, noneMatch),
+                        DataLakeTestBase::convertNulls)
+                    .flatMap(conditions -> {
+                        DataLakeRequestConditions drc = new DataLakeRequestConditions().setLeaseId(conditions.get(0))
+                            .setIfMatch(match)
+                            .setIfNoneMatch(conditions.get(1))
+                            .setIfModifiedSince(modified)
+                            .setIfUnmodifiedSince(unmodified);
+                        ParallelTransferOptions parallelTransferOptions
+                            = new ParallelTransferOptions().setBlockSizeLong(10L);
+
+                        return fac.uploadWithResponse(Flux.just(getRandomData(10)), parallelTransferOptions, null, null,
+                            drc);
+                    }));
+
+        StepVerifier.create(response).verifyErrorSatisfies(ex -> {
+            DataLakeStorageException exception = assertInstanceOf(DataLakeStorageException.class, ex);
+            assertEquals(412, exception.getStatusCode());
+        });
+    }
+
+    // UploadBufferPool used to lock when the number of failed stageblocks exceeded the maximum number of buffers
+    // (discovered when a leaseId was invalid)
+    @LiveOnly
+    @ParameterizedTest
+    @CsvSource({ "7,2", "5,2" })
+    public void uploadBufferPoolLockThreeOrMoreBuffers(long blockSize, int numBuffers) {
+        ParallelTransferOptions parallelTransferOptions
+            = new ParallelTransferOptions().setBlockSizeLong(blockSize).setMaxConcurrency(numBuffers);
+
+        Mono<Response<PathInfo>> response = dataLakeFileSystemAsyncClient.createFile(generatePathName())
+            .flatMap(fac -> Mono.zip(setupPathLeaseCondition(fac, GARBAGE_LEASE_ID), Mono.just(fac)))
+            .flatMap(tuple -> {
+                DataLakeRequestConditions requestConditions = new DataLakeRequestConditions().setLeaseId(tuple.getT1());
+                return tuple.getT2()
+                    .uploadWithResponse(Flux.just(getRandomData(10)), parallelTransferOptions, null, null,
+                        requestConditions);
+            });
+
+        StepVerifier.create(response).verifyError(DataLakeStorageException.class);
+    }
+
+    @LiveOnly
+    @Test
+    public void bufferedUploadDefaultNoOverwrite() {
+        DataLakeFileAsyncClient fac = dataLakeFileSystemAsyncClient.getFileAsyncClient(generatePathName());
+
+        StepVerifier.create(fac.upload(DATA.getDefaultFlux(), null).then(fac.upload(DATA.getDefaultFlux(), null)))
+            .verifyError(IllegalArgumentException.class);
+    }
+
+    @LiveOnly
+    @Test
+    public void bufferedUploadOverwrite() {
+        DataLakeFileAsyncClient fac = dataLakeFileSystemAsyncClient.getFileAsyncClient(generatePathName());
+
+        File file = getRandomFile(50);
+        file.deleteOnExit();
+        createdFiles.add(file);
+
+        StepVerifier.create(fc.uploadFromFile(file.toPath().toString(), true)).verifyComplete();
+
+        StepVerifier.create(fac.uploadFromFile(getRandomFile(50).toPath().toString(), true)).verifyComplete();
     }
 
 }
