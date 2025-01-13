@@ -2155,21 +2155,6 @@ public class FileSystemAsyncApiTests extends DataLakeTestBase {
     }
 
     @Test
-    public void listPathsCreationTimeParse() {
-        // this test is ensuring that we're handling the date format that the service returns for the creation time
-        // it can be returned in two formats: RFC 1123 date string or Windows file time
-        ListPathsOptions options = new ListPathsOptions().setRecursive(true);
-
-        Flux<PathItem> response = dataLakeFileSystemAsyncClient.getDirectoryAsyncClient(generatePathName())
-            .create()
-            .then(dataLakeFileSystemAsyncClient.getFileAsyncClient(generatePathName()).create())
-            .thenMany(dataLakeFileSystemAsyncClient.listPaths(options));
-
-        // assert that NumberFormatException is not thrown
-        StepVerifier.create(response).thenConsumeWhile(r -> true).verifyComplete();
-    }
-
-    @Test
     public void listPathsReturnUpn() {
         Flux<PathItem> response = dataLakeFileSystemAsyncClient.getDirectoryAsyncClient(generatePathName())
             .create()
@@ -2191,19 +2176,33 @@ public class FileSystemAsyncApiTests extends DataLakeTestBase {
     }
 
     @Test
+    public void listPathsMaxResultsByPage() {
+        Flux<PagedResponse<PathItem>> response
+            = dataLakeFileSystemAsyncClient.getDirectoryAsyncClient(generatePathName())
+                .create()
+                .then(dataLakeFileSystemAsyncClient.getFileAsyncClient(generatePathName()).create())
+                .thenMany(dataLakeFileSystemAsyncClient.listPaths(new ListPathsOptions()).byPage(1));
+
+        StepVerifier.create(response).thenConsumeWhile(page -> {
+            assertEquals(1, page.getValue().size());
+            return true;
+        }).verifyComplete();
+    }
+
+    @Test
     public void listPathsEncryptionScope() {
         FileSystemEncryptionScopeOptions encryptionScope
             = new FileSystemEncryptionScopeOptions().setDefaultEncryptionScope(ENCRYPTION_SCOPE_STRING)
-                .setEncryptionScopeOverridePrevented(true);
+            .setEncryptionScopeOverridePrevented(true);
 
         dataLakeFileSystemAsyncClient
             = primaryDataLakeServiceAsyncClient.getFileSystemAsyncClient(generateFileSystemName());
 
         DataLakeFileSystemAsyncClient client
             = getFileSystemClientBuilder(dataLakeFileSystemAsyncClient.getFileSystemUrl())
-                .credential(getDataLakeCredential())
-                .fileSystemEncryptionScopeOptions(encryptionScope)
-                .buildAsyncClient();
+            .credential(getDataLakeCredential())
+            .fileSystemEncryptionScopeOptions(encryptionScope)
+            .buildAsyncClient();
 
         String dirName = generatePathName();
         String fileName = generatePathName();
@@ -2232,51 +2231,6 @@ public class FileSystemAsyncApiTests extends DataLakeTestBase {
             assertEquals(ENCRYPTION_SCOPE_STRING, r.getEncryptionScope());
             assertFalse(r.isDirectory());
         }).verifyComplete();
-    }
-
-    @Test
-    public void asyncListPathsMaxResultsByPage() {
-        Flux<PagedResponse<PathItem>> response
-            = dataLakeFileSystemAsyncClient.getDirectoryAsyncClient(generatePathName())
-                .create()
-                .then(dataLakeFileSystemAsyncClient.getFileAsyncClient(generatePathName()).create())
-                .thenMany(dataLakeFileSystemAsyncClient.listPaths(new ListPathsOptions()).byPage(1));
-
-        StepVerifier.create(response).thenConsumeWhile(page -> {
-            assertEquals(1, page.getValue().size());
-            return true;
-        }).verifyComplete();
-    }
-
-    @ParameterizedTest
-    @ValueSource(
-        strings = {
-            "%E4%B8%AD%E6%96%87",
-            "az%5B%5D",
-            "hello%20world",
-            "hello%26world",
-            "%21%2A%27%28%29%3B%3A%40%26%3D%2B%24%2C%3F%23%5B%5D" })
-    public void createUrlSpecialCharsEncoded(String name) {
-        // Note you cannot use the / character in a path in datalake unless it is to specify an absolute path
-        // This test checks that we handle path names with encoded special characters correctly.
-
-        DataLakeFileAsyncClient fc1 = dataLakeFileSystemAsyncClient.getFileAsyncClient(name + "file1");
-        DataLakeFileAsyncClient fc2 = dataLakeFileSystemAsyncClient.getFileAsyncClient(name + "file2");
-        DataLakeDirectoryAsyncClient dc1 = dataLakeFileSystemAsyncClient.getDirectoryAsyncClient(name + "dir1");
-        DataLakeDirectoryAsyncClient dc2 = dataLakeFileSystemAsyncClient.getDirectoryAsyncClient(name + "dir2");
-
-        assertAsyncResponseStatusCode(fc1.createWithResponse(null, null, null, null, null), 201);
-        assertAsyncResponseStatusCode(fc2.create().then(fc2.getPropertiesWithResponse(null)), 200);
-        assertAsyncResponseStatusCode(fc2.appendWithResponse(DATA.getDefaultBinaryData(), 0, null, null), 202);
-        assertAsyncResponseStatusCode(dc1.createWithResponse(null, null, null, null, null), 201);
-        assertAsyncResponseStatusCode(dc2.create().then(dc2.getPropertiesWithResponse(null)), 200);
-
-        StepVerifier.create(dataLakeFileSystemAsyncClient.listPaths())
-            .assertNext(r -> assertEquals(name + "dir1", r.getName()))
-            .assertNext(r -> assertEquals(name + "dir2", r.getName()))
-            .assertNext(r -> assertEquals(name + "file1", r.getName()))
-            .assertNext(r -> assertEquals(name + "file2", r.getName()))
-            .verifyComplete();
     }
 
     @ParameterizedTest
@@ -2550,5 +2504,52 @@ public class FileSystemAsyncApiTests extends DataLakeTestBase {
                 .buildAsyncClient();
 
         StepVerifier.create(aadFsClient.exists()).expectNext(true).verifyComplete();
+    }
+
+    //Unique Tests
+    @Test
+    public void listPathsCreationTimeParse() {
+        // this test is ensuring that we're handling the date format that the service returns for the creation time
+        // it can be returned in two formats: RFC 1123 date string or Windows file time
+        ListPathsOptions options = new ListPathsOptions().setRecursive(true);
+
+        Flux<PathItem> response = dataLakeFileSystemAsyncClient.getDirectoryAsyncClient(generatePathName())
+            .create()
+            .then(dataLakeFileSystemAsyncClient.getFileAsyncClient(generatePathName()).create())
+            .thenMany(dataLakeFileSystemAsyncClient.listPaths(options));
+
+        // assert that NumberFormatException is not thrown
+        StepVerifier.create(response).thenConsumeWhile(r -> true).verifyComplete();
+    }
+
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "%E4%B8%AD%E6%96%87",
+            "az%5B%5D",
+            "hello%20world",
+            "hello%26world",
+            "%21%2A%27%28%29%3B%3A%40%26%3D%2B%24%2C%3F%23%5B%5D" })
+    public void createUrlSpecialCharsEncoded(String name) {
+        // Note you cannot use the / character in a path in datalake unless it is to specify an absolute path
+        // This test checks that we handle path names with encoded special characters correctly.
+
+        DataLakeFileAsyncClient fc1 = dataLakeFileSystemAsyncClient.getFileAsyncClient(name + "file1");
+        DataLakeFileAsyncClient fc2 = dataLakeFileSystemAsyncClient.getFileAsyncClient(name + "file2");
+        DataLakeDirectoryAsyncClient dc1 = dataLakeFileSystemAsyncClient.getDirectoryAsyncClient(name + "dir1");
+        DataLakeDirectoryAsyncClient dc2 = dataLakeFileSystemAsyncClient.getDirectoryAsyncClient(name + "dir2");
+
+        assertAsyncResponseStatusCode(fc1.createWithResponse(null, null, null, null, null), 201);
+        assertAsyncResponseStatusCode(fc2.create().then(fc2.getPropertiesWithResponse(null)), 200);
+        assertAsyncResponseStatusCode(fc2.appendWithResponse(DATA.getDefaultBinaryData(), 0, null, null), 202);
+        assertAsyncResponseStatusCode(dc1.createWithResponse(null, null, null, null, null), 201);
+        assertAsyncResponseStatusCode(dc2.create().then(dc2.getPropertiesWithResponse(null)), 200);
+
+        StepVerifier.create(dataLakeFileSystemAsyncClient.listPaths())
+            .assertNext(r -> assertEquals(name + "dir1", r.getName()))
+            .assertNext(r -> assertEquals(name + "dir2", r.getName()))
+            .assertNext(r -> assertEquals(name + "file1", r.getName()))
+            .assertNext(r -> assertEquals(name + "file2", r.getName()))
+            .verifyComplete();
     }
 }
