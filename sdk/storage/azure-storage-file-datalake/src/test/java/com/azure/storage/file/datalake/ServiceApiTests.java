@@ -379,30 +379,6 @@ public class ServiceApiTests extends DataLakeTestBase {
         }
     }
 
-    @Test
-    public void listFileSystemsError() {
-        PagedIterable<FileSystemItem> items = primaryDataLakeServiceClient.listFileSystems();
-
-        assertThrows(DataLakeStorageException.class, () -> items.streamByPage("garbage continuation token").count());
-    }
-
-    @Test
-    public void listFileSystemsWithTimeoutStillBackedByPagedFlux() {
-        List<DataLakeFileSystemClient> fileSystems = new ArrayList<>();
-        try {
-            for (int i = 0; i < 5; i++) {
-                fileSystems.add(primaryDataLakeServiceClient.createFileSystem(generateFileSystemName()));
-            }
-
-            assertDoesNotThrow(() -> primaryDataLakeServiceClient
-                .listFileSystems(new ListFileSystemsOptions().setMaxResultsPerPage(3), Duration.ofSeconds(10))
-                .streamByPage()
-                .count());
-        } finally {
-            fileSystems.forEach(DataLakeFileSystemClient::delete);
-        }
-    }
-
     @ResourceLock("ServiceProperties")
     @RequiredServiceVersion(clazz = DataLakeServiceVersion.class, min = "2020-10-02")
     @Test
@@ -617,56 +593,6 @@ public class ServiceApiTests extends DataLakeTestBase {
         assertEquals(blobName, pathItems.get(0).getName());
     }
 
-    @RequiredServiceVersion(clazz = DataLakeServiceVersion.class, min = "2019-12-12")
-    @Test
-    public void restoreFileSystemAsync() {
-        DataLakeFileSystemAsyncClient cc1
-            = primaryDataLakeServiceAsyncClient.getFileSystemAsyncClient(generateFileSystemName());
-        String blobName = generatePathName();
-
-        Mono<List<PathItem>> blobContainerItemMono = cc1.create()
-            .then(cc1.getFileAsyncClient(blobName).upload(DATA.getDefaultFlux(), new ParallelTransferOptions()))
-            .then(cc1.delete())
-            .then(primaryDataLakeServiceAsyncClient
-                .listFileSystems(new ListFileSystemsOptions().setPrefix(cc1.getFileSystemName())
-                    .setDetails(new FileSystemListDetails().setRetrieveDeleted(true)))
-                .next())
-            .flatMap(blobContainerItem -> waitUntilFileSystemIsDeletedAsync(primaryDataLakeServiceAsyncClient
-                .undeleteFileSystem(blobContainerItem.getName(), blobContainerItem.getVersion())))
-            .flatMap(restoredContainerClient -> restoredContainerClient.listPaths().collectList());
-
-        StepVerifier.create(blobContainerItemMono).assertNext(pathItems -> {
-            assertEquals(1, pathItems.size());
-            assertEquals(blobName, pathItems.get(0).getName());
-        }).verifyComplete();
-    }
-
-    @RequiredServiceVersion(clazz = DataLakeServiceVersion.class, min = "2019-12-12")
-    @Test
-    public void restoreFileSystemAsyncWithResponse() {
-        DataLakeFileSystemAsyncClient cc1
-            = primaryDataLakeServiceAsyncClient.getFileSystemAsyncClient(generateFileSystemName());
-
-        Mono<Response<DataLakeFileSystemAsyncClient>> blobContainerItemMono = cc1.create()
-            .then(
-                cc1.getFileAsyncClient(generatePathName()).upload(DATA.getDefaultFlux(), new ParallelTransferOptions()))
-            .then(cc1.delete())
-            .then(primaryDataLakeServiceAsyncClient
-                .listFileSystems(new ListFileSystemsOptions().setPrefix(cc1.getFileSystemName())
-                    .setDetails(new FileSystemListDetails().setRetrieveDeleted(true)))
-                .next())
-            .flatMap(blobContainerItem -> waitUntilFileSystemIsDeletedAsync(
-                primaryDataLakeServiceAsyncClient.undeleteFileSystemWithResponse(
-                    new FileSystemUndeleteOptions(blobContainerItem.getName(), blobContainerItem.getVersion()))));
-
-        StepVerifier.create(blobContainerItemMono).assertNext(response -> {
-            assertNotNull(response);
-            assertEquals(201, response.getStatusCode());
-            assertNotNull(response.getValue());
-            assertEquals(cc1.getFileSystemName(), response.getValue().getFileSystemName());
-        }).verifyComplete();
-    }
-
     @Test
     public void restoreFileSystemError() {
         assertThrows(DataLakeStorageException.class,
@@ -873,6 +799,82 @@ public class ServiceApiTests extends DataLakeTestBase {
                 throw new RuntimeException(ex);
             }
         }
+    }
+
+    //Unique Tests
+
+    @Test
+    public void listFileSystemsError() {
+        PagedIterable<FileSystemItem> items = primaryDataLakeServiceClient.listFileSystems();
+
+        assertThrows(DataLakeStorageException.class, () -> items.streamByPage("garbage continuation token").count());
+    }
+
+    @Test
+    public void listFileSystemsWithTimeoutStillBackedByPagedFlux() {
+        List<DataLakeFileSystemClient> fileSystems = new ArrayList<>();
+        try {
+            for (int i = 0; i < 5; i++) {
+                fileSystems.add(primaryDataLakeServiceClient.createFileSystem(generateFileSystemName()));
+            }
+
+            assertDoesNotThrow(() -> primaryDataLakeServiceClient
+                .listFileSystems(new ListFileSystemsOptions().setMaxResultsPerPage(3), Duration.ofSeconds(10))
+                .streamByPage()
+                .count());
+        } finally {
+            fileSystems.forEach(DataLakeFileSystemClient::delete);
+        }
+    }
+
+    @RequiredServiceVersion(clazz = DataLakeServiceVersion.class, min = "2019-12-12")
+    @Test
+    public void restoreFileSystemAsync() {
+        DataLakeFileSystemAsyncClient cc1
+            = primaryDataLakeServiceAsyncClient.getFileSystemAsyncClient(generateFileSystemName());
+        String blobName = generatePathName();
+
+        Mono<List<PathItem>> blobContainerItemMono = cc1.create()
+            .then(cc1.getFileAsyncClient(blobName).upload(DATA.getDefaultFlux(), new ParallelTransferOptions()))
+            .then(cc1.delete())
+            .then(primaryDataLakeServiceAsyncClient
+                .listFileSystems(new ListFileSystemsOptions().setPrefix(cc1.getFileSystemName())
+                    .setDetails(new FileSystemListDetails().setRetrieveDeleted(true)))
+                .next())
+            .flatMap(blobContainerItem -> waitUntilFileSystemIsDeletedAsync(primaryDataLakeServiceAsyncClient
+                .undeleteFileSystem(blobContainerItem.getName(), blobContainerItem.getVersion())))
+            .flatMap(restoredContainerClient -> restoredContainerClient.listPaths().collectList());
+
+        StepVerifier.create(blobContainerItemMono).assertNext(pathItems -> {
+            assertEquals(1, pathItems.size());
+            assertEquals(blobName, pathItems.get(0).getName());
+        }).verifyComplete();
+    }
+
+    @RequiredServiceVersion(clazz = DataLakeServiceVersion.class, min = "2019-12-12")
+    @Test
+    public void restoreFileSystemAsyncWithResponse() {
+        DataLakeFileSystemAsyncClient cc1
+            = primaryDataLakeServiceAsyncClient.getFileSystemAsyncClient(generateFileSystemName());
+
+        Mono<Response<DataLakeFileSystemAsyncClient>> blobContainerItemMono = cc1.create()
+            .then(
+                cc1.getFileAsyncClient(generatePathName()).upload(DATA.getDefaultFlux(), new ParallelTransferOptions()))
+            .then(cc1.delete())
+            .then(primaryDataLakeServiceAsyncClient
+                .listFileSystems(new ListFileSystemsOptions().setPrefix(cc1.getFileSystemName())
+                    .setDetails(new FileSystemListDetails().setRetrieveDeleted(true)))
+                .next())
+            .flatMap(blobContainerItem -> waitUntilFileSystemIsDeletedAsync(
+                primaryDataLakeServiceAsyncClient.undeleteFileSystemWithResponse(
+                    new FileSystemUndeleteOptions(blobContainerItem.getName(), blobContainerItem.getVersion()))));
+
+        StepVerifier.create(blobContainerItemMono).assertNext(response -> {
+            assertNotNull(response);
+            assertEquals(201, response.getStatusCode());
+            assertNotNull(response.getValue());
+            assertEquals(cc1.getFileSystemName(), response.getValue().getFileSystemName());
+        }).verifyComplete();
     }
 
     private static <T> Mono<T> waitUntilFileSystemIsDeletedAsync(Mono<T> waitUntilOperation) {
