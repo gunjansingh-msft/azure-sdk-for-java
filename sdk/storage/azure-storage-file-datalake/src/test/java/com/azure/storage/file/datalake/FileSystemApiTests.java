@@ -2069,71 +2069,6 @@ public class FileSystemApiTests extends DataLakeTestBase {
         assertFalse(response.hasNext());
     }
 
-    @Test
-    public void listPathsCreationTimeParse() {
-        // this test is ensuring that we're handling the date format that the service returns for the creation time
-        // it can be returned in two formats: RFC 1123 date string or Windows file time
-        dataLakeFileSystemClient.getDirectoryClient(generatePathName()).create();
-        dataLakeFileSystemClient.getFileClient(generatePathName()).create();
-        ListPathsOptions options = new ListPathsOptions().setRecursive(true);
-
-        // assert that NumberFormatException is not thrown
-        assertDoesNotThrow(() -> dataLakeFileSystemClient.listPaths(options, null));
-    }
-
-    @ParameterizedTest
-    @MethodSource("creationTimeDateParseSupplier")
-    public void creationTimeDateParse(String dateString, OffsetDateTime expectedDateTime) {
-        OffsetDateTime dateTime = Transforms.parseWindowsFileTimeOrDateString(dateString);
-        assertEquals(expectedDateTime, dateTime);
-    }
-
-    private static Stream<Arguments> creationTimeDateParseSupplier() {
-        return Stream.of(Arguments.of("133349422459014187", OffsetDateTime.parse("2023-07-27T14:37:25.901Z")),
-            Arguments.of("Wed, 29 Nov 2023 03:08:19 GMT",
-                OffsetDateTime.parse("Wed, 29 Nov 2023 03:08:19 GMT", DateTimeFormatter.RFC_1123_DATE_TIME)),
-            Arguments.of(null, null));
-    }
-
-    @Test
-    public void creationTimeDateParseBadData() {
-        assertThrows(RuntimeException.class, () -> Transforms.parseWindowsFileTimeOrDateString("bad date string"));
-    }
-
-    @ParameterizedTest
-    @ValueSource(
-        strings = {
-            "%E4%B8%AD%E6%96%87",
-            "az%5B%5D",
-            "hello%20world",
-            "hello%26world",
-            "%21%2A%27%28%29%3B%3A%40%26%3D%2B%24%2C%3F%23%5B%5D" })
-    public void createUrlSpecialCharsEncoded(String name) {
-        // Note you cannot use the / character in a path in datalake unless it is to specify an absolute path
-        // This test checks that we handle path names with encoded special characters correctly.
-
-        DataLakeFileClient fc1 = dataLakeFileSystemClient.getFileClient(name + "file1");
-        DataLakeFileClient fc2 = dataLakeFileSystemClient.getFileClient(name + "file2");
-        DataLakeDirectoryClient dc1 = dataLakeFileSystemClient.getDirectoryClient(name + "dir1");
-        DataLakeDirectoryClient dc2 = dataLakeFileSystemClient.getDirectoryClient(name + "dir2");
-
-        assertEquals(201, fc1.createWithResponse(null, null, null, null, null, null, null).getStatusCode());
-        fc2.create();
-        assertEquals(200, fc2.getPropertiesWithResponse(null, null, null).getStatusCode());
-        assertEquals(202,
-            fc2.appendWithResponse(DATA.getDefaultBinaryData(), 0, null, null, null, null).getStatusCode());
-        assertEquals(201, dc1.createWithResponse(null, null, null, null, null, null, null).getStatusCode());
-        dc2.create();
-        assertEquals(200, dc2.getPropertiesWithResponse(null, null, null).getStatusCode());
-
-        Iterator<PathItem> paths = dataLakeFileSystemClient.listPaths().iterator();
-
-        assertEquals(name + "dir1", paths.next().getName());
-        assertEquals(name + "dir2", paths.next().getName());
-        assertEquals(name + "file1", paths.next().getName());
-        assertEquals(name + "file2", paths.next().getName());
-    }
-
     @ParameterizedTest
     @MethodSource("publicAccessSupplier")
     @PlaybackOnly
@@ -2381,6 +2316,72 @@ public class FileSystemApiTests extends DataLakeTestBase {
                 .buildClient();
 
         assertTrue(aadFsClient.exists());
+    }
+
+    //Unique Tests
+    @Test
+    public void listPathsCreationTimeParse() {
+        // this test is ensuring that we're handling the date format that the service returns for the creation time
+        // it can be returned in two formats: RFC 1123 date string or Windows file time
+        dataLakeFileSystemClient.getDirectoryClient(generatePathName()).create();
+        dataLakeFileSystemClient.getFileClient(generatePathName()).create();
+        ListPathsOptions options = new ListPathsOptions().setRecursive(true);
+
+        // assert that NumberFormatException is not thrown
+        assertDoesNotThrow(() -> dataLakeFileSystemClient.listPaths(options, null));
+    }
+
+    @ParameterizedTest
+    @MethodSource("creationTimeDateParseSupplier")
+    public void creationTimeDateParse(String dateString, OffsetDateTime expectedDateTime) {
+        OffsetDateTime dateTime = Transforms.parseWindowsFileTimeOrDateString(dateString);
+        assertEquals(expectedDateTime, dateTime);
+    }
+
+    private static Stream<Arguments> creationTimeDateParseSupplier() {
+        return Stream.of(Arguments.of("133349422459014187", OffsetDateTime.parse("2023-07-27T14:37:25.901Z")),
+            Arguments.of("Wed, 29 Nov 2023 03:08:19 GMT",
+                OffsetDateTime.parse("Wed, 29 Nov 2023 03:08:19 GMT", DateTimeFormatter.RFC_1123_DATE_TIME)),
+            Arguments.of(null, null));
+    }
+
+    @Test
+    public void creationTimeDateParseBadData() {
+        assertThrows(RuntimeException.class, () -> Transforms.parseWindowsFileTimeOrDateString("bad date string"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "%E4%B8%AD%E6%96%87",
+            "az%5B%5D",
+            "hello%20world",
+            "hello%26world",
+            "%21%2A%27%28%29%3B%3A%40%26%3D%2B%24%2C%3F%23%5B%5D" })
+    public void createUrlSpecialCharsEncoded(String name) {
+        // Note you cannot use the / character in a path in datalake unless it is to specify an absolute path
+        // This test checks that we handle path names with encoded special characters correctly.
+
+        DataLakeFileClient fc1 = dataLakeFileSystemClient.getFileClient(name + "file1");
+        DataLakeFileClient fc2 = dataLakeFileSystemClient.getFileClient(name + "file2");
+        DataLakeDirectoryClient dc1 = dataLakeFileSystemClient.getDirectoryClient(name + "dir1");
+        DataLakeDirectoryClient dc2 = dataLakeFileSystemClient.getDirectoryClient(name + "dir2");
+
+        assertEquals(201, fc1.createWithResponse(null, null, null, null, null, null, null).getStatusCode());
+        fc2.create();
+        assertEquals(200, fc2.getPropertiesWithResponse(null, null, null).getStatusCode());
+        assertEquals(202,
+            fc2.appendWithResponse(DATA.getDefaultBinaryData(), 0, null, null, null, null).getStatusCode());
+        assertEquals(201, dc1.createWithResponse(null, null, null, null, null, null, null).getStatusCode());
+        dc2.create();
+        assertEquals(200, dc2.getPropertiesWithResponse(null, null, null).getStatusCode());
+
+        Iterator<PathItem> paths = dataLakeFileSystemClient.listPaths().iterator();
+
+        assertEquals(name + "dir1", paths.next().getName());
+        assertEquals(name + "dir2", paths.next().getName());
+        assertEquals(name + "file1", paths.next().getName());
+        assertEquals(name + "file2", paths.next().getName());
     }
 
     //    @Test
