@@ -551,6 +551,74 @@ public class SasTests extends DataLakeTestBase {
                 .create());
     }
 
+    @Test
+    public void canUseSasToAuthenticate() {
+        AccountSasService service = new AccountSasService().setBlobAccess(true);
+        AccountSasResourceType resourceType
+            = new AccountSasResourceType().setContainer(true).setService(true).setObject(true);
+        AccountSasPermission permissions = new AccountSasPermission().setReadPermission(true);
+        String sas = primaryDataLakeServiceClient.generateAccountSas(
+            new AccountSasSignatureValues(testResourceNamer.now().plusDays(1), permissions, service, resourceType));
+        String pathName = generatePathName();
+        dataLakeFileSystemClient.createDirectory(pathName);
+        String fileSystemUrl = dataLakeFileSystemClient.getFileSystemUrl();
+
+        assertDoesNotThrow(
+            () -> instrument(new DataLakeFileSystemClientBuilder().endpoint(fileSystemUrl).sasToken(sas)).buildClient()
+                .getProperties());
+
+        assertDoesNotThrow(() -> instrument(
+            new DataLakeFileSystemClientBuilder().endpoint(fileSystemUrl).credential(new AzureSasCredential(sas)))
+            .buildClient()
+            .getProperties());
+
+        assertDoesNotThrow(
+            () -> instrument(new DataLakeFileSystemClientBuilder().endpoint(fileSystemUrl + "?" + sas)).buildClient()
+                .getProperties());
+
+        assertDoesNotThrow(
+            () -> instrument(new DataLakePathClientBuilder().endpoint(fileSystemUrl).pathName(pathName).sasToken(sas))
+                .buildDirectoryClient()
+                .getProperties());
+
+        assertDoesNotThrow(() -> instrument(new DataLakePathClientBuilder().endpoint(fileSystemUrl)
+            .pathName(pathName)
+            .credential(new AzureSasCredential(sas))).buildDirectoryClient().getProperties());
+
+        assertDoesNotThrow(
+            () -> instrument(new DataLakePathClientBuilder().endpoint(fileSystemUrl + "?" + sas).pathName(pathName))
+                .buildDirectoryClient()
+                .getProperties());
+
+        assertDoesNotThrow(
+            () -> instrument(new DataLakePathClientBuilder().endpoint(fileSystemUrl).pathName(pathName).sasToken(sas))
+                .buildFileClient()
+                .getProperties());
+
+        assertDoesNotThrow(() -> instrument(new DataLakePathClientBuilder().endpoint(fileSystemUrl)
+            .pathName(pathName)
+            .credential(new AzureSasCredential(sas))).buildFileClient().getProperties());
+
+        assertDoesNotThrow(
+            () -> instrument(new DataLakePathClientBuilder().endpoint(fileSystemUrl + "?" + sas).pathName(pathName))
+                .buildFileClient()
+                .getProperties());
+
+        assertDoesNotThrow(
+            () -> instrument(new DataLakeServiceClientBuilder().endpoint(fileSystemUrl).sasToken(sas)).buildClient()
+                .getProperties());
+
+        assertDoesNotThrow(() -> instrument(
+            new DataLakeServiceClientBuilder().endpoint(fileSystemUrl).credential(new AzureSasCredential(sas)))
+            .buildClient()
+            .getProperties());
+
+        assertDoesNotThrow(
+            () -> instrument(new DataLakeServiceClientBuilder().endpoint(fileSystemUrl + "?" + sas)).buildClient()
+                .getProperties());
+    }
+
+    //Unique Tests
     /*
      This test will ensure that each field gets placed into the proper location within the string to sign and that null
      values are handled correctly. We will validate the whole SAS with service calls as well as correct serialization of
@@ -835,72 +903,4 @@ public class SasTests extends DataLakeTestBase {
                     + "\n/blob/%s/fileSystemName/pathName\n\n\n\n\n\n\n\n\ncid\n\n\n" + Constants.SAS_SERVICE_VERSION
                     + "\nb\n\n\n\n\n\n\n"));
     }
-
-    @Test
-    public void canUseSasToAuthenticate() {
-        AccountSasService service = new AccountSasService().setBlobAccess(true);
-        AccountSasResourceType resourceType
-            = new AccountSasResourceType().setContainer(true).setService(true).setObject(true);
-        AccountSasPermission permissions = new AccountSasPermission().setReadPermission(true);
-        String sas = primaryDataLakeServiceClient.generateAccountSas(
-            new AccountSasSignatureValues(testResourceNamer.now().plusDays(1), permissions, service, resourceType));
-        String pathName = generatePathName();
-        dataLakeFileSystemClient.createDirectory(pathName);
-        String fileSystemUrl = dataLakeFileSystemClient.getFileSystemUrl();
-
-        assertDoesNotThrow(
-            () -> instrument(new DataLakeFileSystemClientBuilder().endpoint(fileSystemUrl).sasToken(sas)).buildClient()
-                .getProperties());
-
-        assertDoesNotThrow(() -> instrument(
-            new DataLakeFileSystemClientBuilder().endpoint(fileSystemUrl).credential(new AzureSasCredential(sas)))
-                .buildClient()
-                .getProperties());
-
-        assertDoesNotThrow(
-            () -> instrument(new DataLakeFileSystemClientBuilder().endpoint(fileSystemUrl + "?" + sas)).buildClient()
-                .getProperties());
-
-        assertDoesNotThrow(
-            () -> instrument(new DataLakePathClientBuilder().endpoint(fileSystemUrl).pathName(pathName).sasToken(sas))
-                .buildDirectoryClient()
-                .getProperties());
-
-        assertDoesNotThrow(() -> instrument(new DataLakePathClientBuilder().endpoint(fileSystemUrl)
-            .pathName(pathName)
-            .credential(new AzureSasCredential(sas))).buildDirectoryClient().getProperties());
-
-        assertDoesNotThrow(
-            () -> instrument(new DataLakePathClientBuilder().endpoint(fileSystemUrl + "?" + sas).pathName(pathName))
-                .buildDirectoryClient()
-                .getProperties());
-
-        assertDoesNotThrow(
-            () -> instrument(new DataLakePathClientBuilder().endpoint(fileSystemUrl).pathName(pathName).sasToken(sas))
-                .buildFileClient()
-                .getProperties());
-
-        assertDoesNotThrow(() -> instrument(new DataLakePathClientBuilder().endpoint(fileSystemUrl)
-            .pathName(pathName)
-            .credential(new AzureSasCredential(sas))).buildFileClient().getProperties());
-
-        assertDoesNotThrow(
-            () -> instrument(new DataLakePathClientBuilder().endpoint(fileSystemUrl + "?" + sas).pathName(pathName))
-                .buildFileClient()
-                .getProperties());
-
-        assertDoesNotThrow(
-            () -> instrument(new DataLakeServiceClientBuilder().endpoint(fileSystemUrl).sasToken(sas)).buildClient()
-                .getProperties());
-
-        assertDoesNotThrow(() -> instrument(
-            new DataLakeServiceClientBuilder().endpoint(fileSystemUrl).credential(new AzureSasCredential(sas)))
-                .buildClient()
-                .getProperties());
-
-        assertDoesNotThrow(
-            () -> instrument(new DataLakeServiceClientBuilder().endpoint(fileSystemUrl + "?" + sas)).buildClient()
-                .getProperties());
-    }
-
 }
